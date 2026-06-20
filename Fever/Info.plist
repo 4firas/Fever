@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+ "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Fever</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.fir4s.fever</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Fever uses the camera to track body pose and stream joint data to VRChat over OSC.</string>
+    <key>NSMotionUsageDescription</key>
+    <string>Fever uses motion sensors to stabilize body orientation.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Fever sends OSC UDP packets to VRChat on your local network.</string>
+    <key>NSBonjourServices</key>
+    <array/>
+</dict>
+</plist>

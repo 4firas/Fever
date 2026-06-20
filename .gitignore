@@ -1,0 +1,33 @@
+# Swift / SwiftPM
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj
+
+# macOS
+.DS_Store
+
+# Built app bundle
+*.app
+dist/
+
+# Bundled runtime + model assets (fetched on setup, not committed)
+Sidecar/.venv/
+Sidecar/python/
+Models/*.task
+Models/*.tflite
+*.whl
+
+# Local capture footage / pasted scratch images
+*.mp4
+*.mov
+Pasted*.png
+
+# Local scratch + working notes
+FEVER-SPEC.json
+NIGHT-REFINEMENT-LOG.md
+pi-session-recap.md
+.rotation-fix.js
+.vrchat-fixes.js
+docs/
+Package.resources/
