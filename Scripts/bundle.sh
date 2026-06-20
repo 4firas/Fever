@@ -87,7 +87,7 @@ cat > "${CONTENTS}/Info.plist" <<'PLIST'
     <key>LSMinimumSystemVersion</key>
     <string>26.0</string>
     <key>NSCameraUsageDescription</key>
-    <string>Fever uses the camera to track and record your pull-up form during workout sessions.</string>
+    <string>Fever uses the camera to track your full body and stream it to VRChat.</string>
 </dict>
 </plist>
 PLIST
@@ -95,11 +95,27 @@ PLIST
 # --- 5. Write PkgInfo --------------------------------------------------------
 printf 'APPL????' > "${CONTENTS}/PkgInfo"
 
+# --- 5a. Embed the MediaPipe sidecar (Python 3.12 + deps) + pose model -------
+echo "==> Embedding sidecar (Python + mediapipe) + pose model…"
+mkdir -p "${RESOURCES_DIR}/Models"
+cp "${PROJECT_ROOT}/Models/pose_landmarker_full.task" "${RESOURCES_DIR}/Models/"
+"${PROJECT_ROOT}/Scripts/stage-embedded-python.sh" "${RESOURCES_DIR}/sidecar"
+
 # --- 5b. Strip extended attributes -------------------------------------------
 # Finder/Spotlight can attach a com.apple.FinderInfo (and other) xattrs to the
 # bundle, which makes `codesign --verify --strict` reject it as "detritus".
 # Clear them recursively before signing so verification stays reliable.
 xattr -cr "${APP_DIR}"
+
+# --- 5c. Sign every embedded mach-O inside-out (BEFORE the app seal) ----------
+# So `codesign --verify --strict` accepts the bundle, and the spawned python
+# (signed ad-hoc, no hardened runtime) loads its own ad-hoc-signed .so/.dylib
+# freely. The app itself carries disable-library-validation (see entitlements).
+echo "==> Signing embedded sidecar mach-O (inside-out)…"
+find "${RESOURCES_DIR}/sidecar" -type f \( -name "*.so" -o -name "*.dylib" \) -print0 \
+  | xargs -0 -P4 -I{} codesign --force -s - "{}" 2>/dev/null || true
+find "${RESOURCES_DIR}/sidecar/python/bin" -type f -name "python3*" -print0 \
+  | xargs -0 -I{} codesign --force -s - "{}" 2>/dev/null || true
 
 # --- 6. Ad-hoc codesign (AFTER Info.plist), in the off-volume temp dir -------
 echo "==> Codesigning (ad-hoc, hardened runtime, with entitlements) in ${BUILD_DIR}…"

@@ -11,5 +11,9 @@
     <true/>
     <key>com.apple.security.network.server</key>
     <false/>
+    <!-- The app spawns an embedded Python sidecar that loads many ad-hoc-signed
+         .so/.dylib files; allow library loading across signing identities. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
 </dict>
 </plist>
