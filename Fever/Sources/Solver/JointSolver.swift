@@ -73,11 +73,19 @@ public struct JointSolver {
         // hip is, then scaled together by solverPosition downstream.
         let stanceCenterRaw = (l[.leftAnkle].position + l[.rightAnkle].position) * 0.5
         let stanceWidthRaw = simd_length(l[.rightAnkle].position - l[.leftAnkle].position)
+        // Weight-shift sway is only meaningful when BOTH feet form the base of
+        // support. When one foot lifts (raising a leg forward/sideways), the ankle
+        // midpoint is no longer the stance center, and amplifying hip-vs-stance
+        // shoves the hip the wrong way — the reported "raise a leg → hip pushed
+        // back". Ramp the exaggeration off as a foot leaves the floor (ankle Y gap).
+        let ankleYGap = abs(l[.leftAnkle].position.y - l[.rightAnkle].position.y)
+        let stancePlanted = stancePlantedFactor(ankleYGap)
         let hip = solveHip(l, scale: s, chest: chest)
         joints.append(applyHipAdjustments(hip,
                                           chest: chest,
                                           stanceCenter: solverPosition(stanceCenterRaw, scale: s),
-                                          stanceWidth: stanceWidthRaw * s))
+                                          stanceWidth: stanceWidthRaw * s,
+                                          stancePlanted: stancePlanted))
 
         // --- Elbows ---
         joints.append(solveElbow(.leftElbow,
@@ -246,23 +254,31 @@ public struct JointSolver {
         let positionSource = settings.footTrackersAtAnkle ? ankle.position : toe.position
         let pos = solverPosition(positionSource, scale: scale)
 
-        // OSC ROTATION — LOCKED ROLL (VRChat IK 2.0 ankle model). A single camera
-        // gives NO reliable ankle roll (true even on real FBT hardware), so we do
-        // NOT derive roll from the constant synthesized heel→toe vector (which can
-        // never articulate). Instead:
-        //   up      = world up (0,1,0)                         → frame local +Y
-        //   forward = the shank direction (knee→ankle) FLATTENED ⟂ up (its ground
-        //             projection) → gives real foot YAW, and the small residual
-        //             vertical component a frame-by-frame leg lean adds reads as a
-        //             bounded PITCH. forward is the lateral/secondary hint.
-        // qFoot = frameFromTwoAxes(primary: up, secondary: forward) → real yaw +
-        // pitch, stable ZERO roll. Degenerate (shank ∥ up, i.e. forward collapses)
-        // holds last.
-        let up = SIMD3<Float>(0, 1, 0)
-        let shank = ankle.position - knee.position           // points down the leg
-        // Ground projection: remove the up component → yaw-bearing forward.
-        let flat = shank - up * simd_dot(shank, up)
-        let forward = simd_length(flat) > 1e-4 ? flat : (toe.position - ankle.position)
+        // OSC ROTATION — REAL FOOT FRAME from the DETECTED heel→toe vector.
+        // MediaPipe actually detects the heel (29/30) and foot-index (31/32) — the
+        // old Vision path SYNTHESIZED them as constants, which is why the foot
+        // could never follow the real ankle and instead spun off the shank. The
+        // foot's true pointing direction now drives orientation:
+        //   forward = heel → toe   → real foot YAW (turn your foot) and PITCH
+        //             (point your toes); it responds to ANKLE motion, not the leg.
+        //   up      = world-up with the forward component removed (Gram-Schmidt),
+        //             so pitch follows the toe while ROLL stays locked (a single
+        //             camera has no reliable foot roll).
+        // Falls back to the shank's ground projection if the foot landmarks
+        // collapse/occlude; a fully degenerate frame holds last (never fabricates).
+        let worldUp = SIMD3<Float>(0, 1, 0)
+        var forward = toe.position - heel.position
+        if simd_length(forward) < 1e-4 {
+            let shank = ankle.position - knee.position
+            forward = shank - worldUp * simd_dot(shank, worldUp)   // ground projection
+        }
+        var up = worldUp
+        let fl = simd_length(forward)
+        if fl > 1e-4 {
+            let f = forward / fl
+            let perp = worldUp - f * simd_dot(f, worldUp)
+            if simd_length(perp) > 1e-4 { up = simd_normalize(perp) }
+        }
         let rot = frameFromTwoAxes(primary: up, secondary: forward, holdLast: held(type))
         record(type, rot)
         let conf = settings.footTrackersAtAnkle ? ankle.visibility : toe.visibility
@@ -282,10 +298,23 @@ public struct JointSolver {
     private static let hipSwayMinClamp: Float = 0.12    // 12 cm
     private static let hipSwayClampMargin: Float = 0.06 // +6 cm past half-stance
 
+    /// Stance is a valid weight-shift base only with both feet planted. As one
+    /// ankle lifts above the other (a leg raise / big step), ramp the hip-sway
+    /// exaggeration off so leg motion never drags the hip. `ankleYGap` is in the
+    /// solver frame (≈ real metres under the MediaPipe world frame).
+    private static let stanceLiftFull: Float = 0.10   // gap ≤ this → fully planted
+    private static let stanceLiftNone: Float = 0.28   // gap ≥ this → stance broken
+    private func stancePlantedFactor(_ ankleYGap: Float) -> Float {
+        if ankleYGap <= Self.stanceLiftFull { return 1 }
+        if ankleYGap >= Self.stanceLiftNone { return 0 }
+        return 1 - (ankleYGap - Self.stanceLiftFull) / (Self.stanceLiftNone - Self.stanceLiftFull)
+    }
+
     private func applyHipAdjustments(_ hip: VRJoint,
                                      chest: VRJoint,
                                      stanceCenter: SIMD3<Float>,
-                                     stanceWidth: Float) -> VRJoint {
+                                     stanceWidth: Float,
+                                     stancePlanted: Float) -> VRJoint {
         var j = hip
 
         // ── POSITION-SPACE HIP SWAY (PinoFBT-style dynamic exaggeration) ──────
@@ -310,9 +339,11 @@ public struct JointSolver {
         dX = applyDeadband(dX, Self.hipSwayDeadband)
         dZ = applyDeadband(dZ, Self.hipSwayDeadband)
 
-        // Amplified deviation (extra displacement ADDED to the true hip).
-        var exX = dX * (gainX - 1)
-        var exZ = dZ * (gainZ - 1)
+        // Amplified deviation (extra displacement ADDED to the true hip), gated by
+        // how planted the stance is — a lifted foot zeroes the exaggeration so a
+        // leg raise never drags the hip.
+        var exX = dX * (gainX - 1) * stancePlanted
+        var exZ = dZ * (gainZ - 1) * stancePlanted
 
         // Clamp the amplified deviation so the hip never leaves the body, even on
         // a spike or narrow stance. Bound = half stance width + margin (with a

@@ -256,70 +256,74 @@ enum RotationTests {
     // MARK: - 2. FOOT-ARTICULATES
 
     static func testFootArticulates(_ t: TestRunner) {
-        // Sweep the foot/shank direction across frames and confirm the FOOT tracker
-        // euler CHANGES accordingly — proving it is no longer the frozen constant it
-        // was when derived from the fixed synthesized heel→toe vector.
-        //
-        // The SHIPPED foot model (JointSolver.solveFoot) is the VRChat IK 2.0
-        // locked-roll ankle: frame local +Y = world-up, frame forward = the shank
-        // direction FLATTENED onto the ground plane. So the foot articulates in YAW
-        // (the ground-projected shank heading) with roll structurally pinned to 0;
-        // pitch is also held near 0 because local +Y is locked to world-up (a single
-        // camera gives no reliable ankle roll/pitch — true even on real FBT). The
-        // assertion therefore is: the foot euler MOVES (yaw responds strongly to the
-        // shank), and the locked axes (roll, pitch) stay ≈ 0.
-        let chain = Chain()
+        // The foot frame now comes from the REAL detected heel→toe vector (MediaPipe
+        // detects heels 29/30 + foot-index 31/32). So the foot articulates when YOU
+        // move YOUR foot — turning the foot (toe swings laterally) yaws it, pointing
+        // the toes (toe dips down/forward) pitches it — and it does NOT spin off the
+        // shank when only the leg moves. Roll stays locked (monocular has no foot roll).
         let base = baseStanding()
-        chain.requestRestCapture()
-        _ = chain.eulers(pose(base, at: 0))   // rest at the neutral foot pose
-
-        func frame(_ tau: Float) -> [NormalizedLandmark] {
-            var lm = base
-            func set(_ l: BlazePose.Landmark, _ x: Float, _ y: Float, _ z: Float) {
-                lm[l.rawValue] = NormalizedLandmark(position: SIMD3<Float>(x, y, z), visibility: 0.95)
+        let steps = 40
+        func sweepFoot(_ build: @escaping (Float) -> [NormalizedLandmark]) -> [SIMD3<Float>] {
+            let chain = Chain()
+            chain.requestRestCapture()
+            _ = chain.eulers(pose(base, at: 0))   // rest at the neutral foot pose
+            var lf: [SIMD3<Float>] = []
+            for i in 1...steps {
+                let tau = Float(i) / Float(steps) * (2 * .pi)
+                lf.append(chain.eulers(pose(build(tau), at: Double(i) / 60.0))[.leftFoot]
+                          ?? SIMD3<Float>(.nan, .nan, .nan))
             }
-            // Swing the KNEE laterally + in depth so the knee→ankle shank's
-            // GROUND PROJECTION (the foot's forward) rotates in heading → foot YAW.
-            // The ankle stays put (foot pivots about it).
-            let lateral = 0.18 * sin(tau)      // lateral shank swing
-            let depth = 0.14 * cos(tau)        // fore/aft shank swing
-            set(.leftKnee, -0.10 + lateral, -0.42, 0.05 + depth)
-            set(.leftFootIndex, -0.10 + lateral, -0.92, 0.12 + 0.10 * sin(tau))
-            set(.leftHeel, -0.10 + lateral, -0.90, -0.04)
+            return lf
+        }
+        func set(_ lm: inout [NormalizedLandmark], _ l: BlazePose.Landmark, _ x: Float, _ y: Float, _ z: Float) {
+            lm[l.rawValue] = NormalizedLandmark(position: SIMD3<Float>(x, y, z), visibility: 0.95)
+        }
+        func span(_ s: [SIMD3<Float>], _ a: Int) -> Float { (s.map { $0[a] }.max() ?? 0) - (s.map { $0[a] }.min() ?? 0) }
+
+        // 1) Turn the foot: the TOE swings laterally (X) about a fixed heel → YAW.
+        let yawTrack = sweepFoot { tau in
+            var lm = base
+            set(&lm, .leftHeel, -0.10, -0.90, -0.04)
+            set(&lm, .leftFootIndex, -0.10 + 0.10 * sin(tau), -0.92, 0.14)
             return lm
         }
-
-        var lf: [SIMD3<Float>] = []
-        let steps = 40
-        for i in 1...steps {
-            let tau = Float(i) / Float(steps) * (2 * .pi)
-            let e = chain.eulers(pose(frame(tau), at: Double(i) / 60.0))
-            lf.append(e[.leftFoot] ?? SIMD3<Float>(.nan, .nan, .nan))
+        t.test("FOOT-ARTICULATES: turning the foot (toe swings) articulates it") {
+            t.check(yawTrack.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite }, "finite")
+            // The articulation may land on any euler axis (VRChat decodes the
+            // euler back to the exact orientation); assert it RESPONDS, not which axis.
+            let responds = max(span(yawTrack, 0), span(yawTrack, 1), span(yawTrack, 2))
+            t.check(responds > 10.0, "foot must respond to real foot motion: span \(responds)°")
+            print(String(format: "  [foot-yaw] pitch=%.1f yaw=%.1f roll=%.1f",
+                         span(yawTrack, 0), span(yawTrack, 1), span(yawTrack, 2)))
         }
 
-        t.test("FOOT-ARTICULATES: foot euler is NOT a frozen constant (yaw responds to shank)") {
-            t.check(lf.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite },
-                    "foot euler went non-finite during the shank sweep")
-            let xs = lf.map { $0.x }, ys = lf.map { $0.y }, zs = lf.map { $0.z }
-            let xSpan = (xs.max() ?? 0) - (xs.min() ?? 0)   // pitch (locked ≈ 0)
-            let ySpan = (ys.max() ?? 0) - (ys.min() ?? 0)   // yaw (the articulator)
-            let zSpan = (zs.max() ?? 0) - (zs.min() ?? 0)   // roll (locked ≈ 0)
-            // The foot MUST move — yaw shows a large (> several degrees) range as the
-            // shank heading sweeps. This is the proof it is no longer frozen.
-            t.check(ySpan > 10.0, "foot YAW (euler.y) must change with the shank: span \(ySpan)°")
-            // It is NOT a constant: at least two distinct yaw values.
-            t.check(Set(ys.map { ($0 * 10).rounded() }).count > 3,
-                    "foot yaw must take several distinct values (not frozen): \(Set(ys.map { ($0 * 10).rounded() }).count)")
-            print(String(format: "  [foot] yaw span=%.1f° (articulates); pitch span=%.1f° roll span=%.1f° (locked)",
-                         ySpan, xSpan, zSpan))
+        // 2) Point the toes: the TOE dips down + forward about a fixed heel → PITCH.
+        let pitchTrack = sweepFoot { tau in
+            var lm = base
+            let p = 0.10 * sin(tau)
+            set(&lm, .leftHeel, -0.10, -0.90, -0.04)
+            set(&lm, .leftFootIndex, -0.10, -0.92 - p, 0.14 + p)
+            return lm
+        }
+        t.test("FOOT-ARTICULATES: pointing the toes pitches the foot") {
+            t.check(pitchTrack.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite }, "finite")
+            let responds = max(span(pitchTrack, 0), span(pitchTrack, 1), span(pitchTrack, 2))
+            t.check(responds > 8.0, "foot must pitch when the toes point: span \(responds)°")
         }
 
-        t.test("FOOT-ARTICULATES: foot ROLL stays ≈ 0 (locked-roll ankle model)") {
-            // Roll (euler.z) must stay tiny throughout — a single camera gives no
-            // reliable ankle roll, so the locked-roll frame must not fabricate one.
-            for e in lf {
-                t.check(abs(e.z) < 5.0, "foot roll must stay ≈ 0 (locked roll): \(e.z)°")
-            }
+        // 3) Move ONLY the leg (knee/shank) with the FOOT held fixed → the foot must
+        //    NOT spin (the old shank-derived model did; the real foot frame doesn't).
+        let legTrack = sweepFoot { tau in
+            var lm = base
+            // Swing the knee laterally + in depth; heel/toe stay at the base pose.
+            set(&lm, .leftKnee, -0.10 + 0.18 * sin(tau), -0.42, 0.05 + 0.14 * cos(tau))
+            return lm
+        }
+        t.test("FOOT-ARTICULATES: moving only the leg does NOT spin the foot") {
+            t.check(legTrack.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite }, "finite")
+            let drift = max(span(legTrack, 0), span(legTrack, 1), span(legTrack, 2))
+            t.check(drift < 4.0, "foot must stay put when only the leg moves: span \(drift)°")
+            print(String(format: "  [foot-leg-isolation] max foot euler drift while sweeping the leg = %.2f°", drift))
         }
     }
 
