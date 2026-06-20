@@ -11,7 +11,7 @@ import FeverCore
 ///     raw 2D (Vision normalized, +Y up)
 ///       → MonocularDepthLift.stableScale        (stable anthropometric scale)
 ///       → MonocularDepthLift.depths             (foreshortening per-joint Z)
-///       → VisionPoseLandmarker.assemble         (heel/toe synth + FLOOR ANCHOR)
+///       → VisionLiftGeometry.assemble         (heel/toe synth + FLOOR ANCHOR)
 ///       → JointSolver.solve                     (9 VRJoints, solver frame)
 ///       → CoordinateMapper.toVRChatPosition     (single VRChat conversion)
 ///       → TrackerAssembler.assemble             (numbered slots + head ref)
@@ -27,7 +27,7 @@ import FeverCore
 /// plus default `enabledJoints` has all 8 numbered trackers and the head
 /// reference is produced.
 ///
-/// This drives the SAME `VisionPoseLandmarker.assemble` lift used by live
+/// This drives the SAME `VisionLiftGeometry.assemble` lift used by live
 /// `detect()` (it is `public` precisely so the test exercises production code,
 /// not a re-implementation).
 enum GeometrySanity {
@@ -67,7 +67,7 @@ enum GeometrySanity {
     }
 
     /// Build the solver-frame `PoseResult` by driving the REAL lift code path.
-    /// Mirrors `VisionPoseLandmarker.detect()`: root origin → stable scale →
+    /// Mirrors `VisionLiftGeometry.detect()`: root origin → stable scale →
     /// foreshortening depth + heel/toe synth + floor anchor (all inside
     /// `assemble`). `lift` is passed in so callers can re-use one instance (to
     /// test scale stability across repeated frames).
@@ -77,7 +77,7 @@ enum GeometrySanity {
                      using liftEngine: MonocularDepthLift,
                      time: TimeInterval = 0,
                      warmupFrames: Int = 60) -> PoseResult? {
-        let root = VisionPoseLandmarker.rootOrigin(raw, present: present)
+        let root = VisionLiftGeometry.rootOrigin(raw, present: present)
         // Warm the exponential scale smoother on the steady pose, exactly as a
         // few seconds of live tracking would, so the scale is fully converged.
         var k: Float = 0
@@ -85,7 +85,7 @@ enum GeometrySanity {
             k = liftEngine.stableScale(xy: raw, present: present) ?? k
         }
         guard k.isFinite, k > 0 else { return nil }
-        return VisionPoseLandmarker.assemble(raw: raw, present: present, root: root,
+        return VisionLiftGeometry.assemble(raw: raw, present: present, root: root,
                                              k: k, depthLift: liftEngine,
                                              imagePoints: image, time: time)
     }

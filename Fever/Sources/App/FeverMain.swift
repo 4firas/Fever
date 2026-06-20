@@ -76,11 +76,10 @@ enum FeverMain {
         }
 
         // Headless. --stub => fully hardware-free (synthetic frames + pose);
-        // otherwise live camera + Apple Vision 3D body pose.
+        // otherwise live camera + MediaPipe body pose (sidecar). The sidecar
+        // backend falls back to the stub if it isn't installed so the app runs.
         let source: FrameSource = useStub ? StubFrameSource() : CameraCapture()
-        let landmarker: PoseLandmarker = useStub
-            ? StubPoseLandmarker()
-            : VisionPoseLandmarker()
+        let landmarker: PoseLandmarker = useStub ? StubPoseLandmarker() : makeLivePoseLandmarker()
 
         // In synthetic stub mode, fire a one-shot Recenter shortly after start so
         // the streamed `/rotation` is the CALIBRATED, rest-relative euler (≈ 0 at

@@ -6,7 +6,7 @@ import FeverCore
 /// the coordinate-model fix so it can never silently regress.
 ///
 /// These exercise the SAME production lift path used by live `detect()`
-/// (`VisionPoseLandmarker.rootOrigin` → `stableScale` → `assemble`, which runs
+/// (`VisionLiftGeometry.rootOrigin` → `stableScale` → `assemble`, which runs
 /// `depths` + `retarget` + hip-world-translation + floor-latch internally), then
 /// the real `JointSolver` → `CoordinateMapper` → `TrackerAssembler`. Nothing is
 /// re-implemented.
@@ -82,13 +82,13 @@ enum CoordinateModelRegression {
                          using eng: MonocularDepthLift,
                          time: TimeInterval = 0,
                          warmupFrames: Int = 120) -> PoseResult? {
-        let root = VisionPoseLandmarker.rootOrigin(p.raw, present: p.present)
+        let root = VisionLiftGeometry.rootOrigin(p.raw, present: p.present)
         var k: Float = 0
         for _ in 0..<warmupFrames {
             k = eng.stableScale(xy: p.raw, present: p.present) ?? k
         }
         guard k.isFinite, k > 0 else { return nil }
-        return VisionPoseLandmarker.assemble(raw: p.raw, present: p.present, root: root,
+        return VisionLiftGeometry.assemble(raw: p.raw, present: p.present, root: root,
                                              k: k, depthLift: eng,
                                              imagePoints: p.image, time: time)
     }

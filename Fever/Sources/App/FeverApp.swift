@@ -41,7 +41,7 @@ struct FeverApp: App {
         let camera = CameraCapture()
         let pipeline = TrackingPipeline(config: config,
                                         source: camera,
-                                        landmarker: VisionPoseLandmarker())
+                                        landmarker: makeLivePoseLandmarker())
         _pipeline = State(initialValue: pipeline)
         self.camera = camera
     }

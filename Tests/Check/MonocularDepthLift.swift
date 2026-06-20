@@ -1,7 +1,10 @@
 import simd
 import Foundation
+import FeverCore
 
 /// Anthropometric bone-length model + monocular 2D→3D depth lift.
+/// (Test-target scaffolding: generates synthetic metric skeletons from 2D
+/// landmarks to exercise the OSC wire path. No longer part of the shipped product.)
 ///
 /// This is the OSC-path fix for the two coordinate-model failures that made
 /// VRChat FBT collapse while the 2D preview stayed perfect:

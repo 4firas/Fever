@@ -126,7 +126,7 @@ public final class TrackingPipeline {
     /// - Parameters:
     ///   - config: live, observable tuning + network settings.
     ///   - source: the frame source (`CameraCapture` live, `StubFrameSource` headless).
-    ///   - landmarker: the pose backend (`VisionPoseLandmarker` live, `StubPoseLandmarker` test).
+    ///   - landmarker: the pose backend (`MediaPipePoseLandmarker` live, `StubPoseLandmarker` test).
     public init(config: TrackingConfig,
                 source: FrameSource,
                 landmarker: PoseLandmarker) {

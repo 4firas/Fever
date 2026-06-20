@@ -58,6 +58,7 @@ struct FeverCheck {
         SidecarProtocolTests.run(t)
         MediaPipeFrameTests.run(t)
         PoseSidecarPathTests.run(t)
+        await MediaPipeLandmarkerTests.run(t)
 
         let summary = t.finalSummary()
         print(summary)

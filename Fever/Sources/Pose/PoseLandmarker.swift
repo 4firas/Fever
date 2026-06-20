@@ -1,9 +1,10 @@
 import CoreVideo
 import Foundation
 
-/// Abstraction over the pose inference backend. The real backend is Apple
-/// Vision (`VisionPoseLandmarker`); `StubPoseLandmarker` synthesizes a static
-/// T-pose so the solver / OSC path can be exercised with no camera or hardware.
+/// Abstraction over the pose inference backend. The real backend is
+/// `MediaPipePoseLandmarker` (BlazePose GHUM via the Python sidecar);
+/// `StubPoseLandmarker` synthesizes a static T-pose so the solver / OSC path can
+/// be exercised with no camera or hardware.
 public protocol PoseLandmarker {
     func detect(_ pixelBuffer: CVPixelBuffer,
                 at time: TimeInterval) async -> PoseResult?
