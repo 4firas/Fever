@@ -57,6 +57,7 @@ struct FeverCheck {
         await RotationWireStub.run(t: t)
         SidecarProtocolTests.run(t)
         MediaPipeFrameTests.run(t)
+        PoseSidecarPathTests.run(t)
 
         let summary = t.finalSummary()
         print(summary)
