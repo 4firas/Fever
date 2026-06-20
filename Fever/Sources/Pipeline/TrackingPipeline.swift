@@ -545,6 +545,12 @@ private final class FrameProcessor: @unchecked Sendable {
     /// SLERP-smoothed, so the wire is bounded & zero-centered. Replaces the old
     /// absolute-quaternion `QuaternionStabilizer` on the OSC rotation path.
     private let rotationRebaser: RotationRebaser
+    /// Per-foot slow-EMA state for the step/stride exaggeration (injected into the
+    /// value-type solver) + raw-landmark cleanup (L/R anti-swap + occlusion gating)
+    /// that runs before gap-fill. Reference types confined to this worker; reset on
+    /// Recenter / run.
+    private let footMotion = FootMotionState()
+    private let consistency = LandmarkConsistency()
     private var solver: JointSolver
     private var mapper: CoordinateMapper
     private var assembler: TrackerAssembler
@@ -564,7 +570,8 @@ private final class FrameProcessor: @unchecked Sendable {
                                              beta: config.stabilizerBetaF)
         self.rotationState = RotationState()
         self.rotationRebaser = RotationRebaser(smoothingFactor: config.rotationSmoothingF)
-        self.solver = JointSolver(settings: config, rotationState: self.rotationState)
+        self.solver = JointSolver(settings: config, rotationState: self.rotationState,
+                                  footMotionState: self.footMotion)
         self.mapper = CoordinateMapper(userHeightMeters: config.userHeightMetersF,
                                        referenceHeightMeters: 1.8,
                                        mirrorHorizontally: config.mirrorTracking)
@@ -582,13 +589,16 @@ private final class FrameProcessor: @unchecked Sendable {
             rotationRebaser.smoothingFactor = config.rotationSmoothingF
             rotationRebaser.reset()
             rotationState.reset()
-            solver = JointSolver(settings: config, rotationState: rotationState)
+            solver = JointSolver(settings: config, rotationState: rotationState,
+                                 footMotionState: footMotion)
             mapper = CoordinateMapper(userHeightMeters: config.userHeightMetersF,
                                       referenceHeightMeters: 1.8,
                                       mirrorHorizontally: config.mirrorTracking)
             assembler = TrackerAssembler(enabled: config.enabledJoints,
                                          slotMap: config.slotMap)
             predictor.reset()
+            footMotion.reset()
+            consistency.reset()
             frameCount = 0
             windowStart = 0
             measuredFPS = 0
@@ -602,6 +612,8 @@ private final class FrameProcessor: @unchecked Sendable {
         angleTracker.stop()
         lock.withLock {
             predictor.reset()
+            footMotion.reset()
+            consistency.reset()
             rotationRebaser.reset()
             rotationState.reset()
             frameCount = 0
@@ -616,7 +628,9 @@ private final class FrameProcessor: @unchecked Sendable {
     /// `landmarks` and the `imagePoints` synthesized where landmarks dropped out.
     /// Runs on the worker; the lock guards against a concurrent rebuild/reset.
     func predict(_ raw: PoseResult) -> PoseResult {
-        lock.withLock { predictor.predict(raw) }
+        // Raw-landmark cleanup (L/R anti-swap + occlusion gating) BEFORE the
+        // predictive gap-fill, so the predictor holds-last on gated-out limbs.
+        lock.withLock { predictor.predict(consistency.process(raw)) }
     }
 
     /// Request a one-shot rest-pose capture for the OSC rotation rebaser, latched

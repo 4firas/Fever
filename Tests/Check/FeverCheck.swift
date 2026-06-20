@@ -66,6 +66,8 @@ struct FeverCheck {
         MediaPipeFrameTests.run(t)
         PoseSidecarPathTests.run(t)
         await MediaPipeLandmarkerTests.run(t)
+        FootExaggerationTests.run(t)
+        LandmarkConsistencyTests.run(t)
 
         let summary = t.finalSummary()
         print(summary)

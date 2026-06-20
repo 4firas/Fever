@@ -135,6 +135,20 @@ public final class TrackingConfig {
     public var kneePosition: Double {
         didSet { UserDefaults.standard.set(kneePosition, forKey: Keys.kneePosition) }
     }
+    /// STEP / STRIDE gain — amplifies a SWINGING foot's horizontal displacement
+    /// from its slow-EMA neutral rest position so steps / walking / dynamic leg
+    /// movement read bigger in VR. 1.0 = literal (no exaggeration); default 1.6.
+    /// Swing-gated (a planted foot is never exaggerated → stays glued to the
+    /// floor) and clamped so a spike can't throw the foot away.
+    public var stepStrideCoefficient: Double {
+        didSet { UserDefaults.standard.set(stepStrideCoefficient, forKey: Keys.stepStrideCoefficient) }
+    }
+    /// STEP LIFT gain — amplifies a SWINGING foot's UPWARD lift above the floor so
+    /// marches / high steps read bigger. Up-only (never pushes a planted foot down
+    /// through the floor). 1.0 = literal; default 1.3.
+    public var stepLiftCoefficient: Double {
+        didSet { UserDefaults.standard.set(stepLiftCoefficient, forKey: Keys.stepLiftCoefficient) }
+    }
 
     // MARK: - Float mirrors for SIMD math
     public var userHeightMetersF: Float { Float(userHeightMeters) }
@@ -143,6 +157,8 @@ public final class TrackingConfig {
     public var hipTwistCoefficientF: Float { Float(hipTwistCoefficient) }
     public var hipLengthF: Float { Float(hipLength) }
     public var kneePositionF: Float { Float(kneePosition) }
+    public var stepStrideCoefficientF: Float { Float(stepStrideCoefficient) }
+    public var stepLiftCoefficientF: Float { Float(stepLiftCoefficient) }
     public var stabilizerMinCutoffF: Float { Float(stabilizerMinCutoff) }
     public var stabilizerBetaF: Float { Float(stabilizerBeta) }
     public var rotationSmoothingF: Float { Float(rotationSmoothing) }
@@ -219,6 +235,12 @@ public final class TrackingConfig {
         hipTwistCoefficient = loadedLean >= 1.0 ? loadedLean : 1.4
         hipLength = d.object(forKey: Keys.hipLength) as? Double ?? 0.0
         kneePosition = d.object(forKey: Keys.kneePosition) as? Double ?? 0.0
+        // Step exaggeration: same >=1.0 load clamp as the hip gains so a stale
+        // sub-1.0 persisted value can never collapse a foot onto its neutral.
+        let loadedStride = d.object(forKey: Keys.stepStrideCoefficient) as? Double ?? 1.6
+        stepStrideCoefficient = loadedStride >= 1.0 ? loadedStride : 1.6
+        let loadedLift = d.object(forKey: Keys.stepLiftCoefficient) as? Double ?? 1.3
+        stepLiftCoefficient = loadedLift >= 1.0 ? loadedLift : 1.3
     }
 
     // MARK: - Persistence keys
@@ -240,5 +262,7 @@ public final class TrackingConfig {
         static let hipTwistCoefficient = "hipTwistCoefficient"
         static let hipLength = "hipLength"
         static let kneePosition = "kneePosition"
+        static let stepStrideCoefficient = "stepStrideCoefficient"
+        static let stepLiftCoefficient = "stepLiftCoefficient"
     }
 }

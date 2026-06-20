@@ -33,9 +33,18 @@ public struct JointSolver {
     /// frames fall back to identity).
     public let rotationState: RotationState?
 
-    public init(settings: TrackingConfig, rotationState: RotationState? = nil) {
+    /// Cross-frame per-foot EMA state for the step/stride exaggeration (reference
+    /// type, owned by FrameProcessor, confined to the serial worker). `nil` in
+    /// position-only / test contexts that don't exercise step exaggeration → the
+    /// foot exaggeration is then a no-op (literal foot position).
+    public let footMotionState: FootMotionState?
+
+    public init(settings: TrackingConfig,
+                rotationState: RotationState? = nil,
+                footMotionState: FootMotionState? = nil) {
         self.settings = settings
         self.rotationState = rotationState
+        self.footMotionState = footMotionState
     }
 
     /// Hold-last for `joint` from the injected `rotationState` (identity if none).
@@ -107,13 +116,15 @@ public struct JointSolver {
             solveKnee(.rightKnee,
                       hip: l[.rightHip], knee: l[.rightKnee], ankle: l[.rightAnkle], scale: s)))
 
-        // --- Feet ---
-        joints.append(solveFoot(.leftFoot,
-                                ankle: l[.leftAnkle], knee: l[.leftKnee],
-                                heel: l[.leftHeel], toe: l[.leftFootIndex], scale: s))
-        joints.append(solveFoot(.rightFoot,
-                                ankle: l[.rightAnkle], knee: l[.rightKnee],
-                                heel: l[.rightHeel], toe: l[.rightFootIndex], scale: s))
+        // --- Feet --- (solve, then step/stride exaggeration via FootMotionState)
+        joints.append(applyFootAdjustments(
+            solveFoot(.leftFoot, ankle: l[.leftAnkle], knee: l[.leftKnee],
+                      heel: l[.leftHeel], toe: l[.leftFootIndex], scale: s),
+            type: .leftFoot, rawAnkle: l[.leftAnkle].position, scale: s))
+        joints.append(applyFootAdjustments(
+            solveFoot(.rightFoot, ankle: l[.rightAnkle], knee: l[.rightKnee],
+                      heel: l[.rightHeel], toe: l[.rightFootIndex], scale: s),
+            type: .rightFoot, rawAnkle: l[.rightAnkle].position, scale: s))
 
         return joints
     }
@@ -384,6 +395,50 @@ public struct JointSolver {
     private func applyKneeAdjustments(_ knee: VRJoint) -> VRJoint {
         var j = knee
         j.position.y += settings.kneePositionF
+        return j
+    }
+
+    // MARK: Step / stride exaggeration
+
+    private static let footStepDeadband: Float = 0.02   // m, pre-gain
+    private static let footStrideClamp: Float = 0.22    // m, horizontal cap
+    private static let footLiftClamp: Float = 0.08      // m, vertical (up-only) cap
+
+    /// Amplify a SWINGING foot's displacement from its slow-EMA neutral so steps /
+    /// walking / dynamic leg movement read bigger, WITHOUT dragging a PLANTED foot
+    /// (swing≈0 → ~no change, stays glued to the floor) and WITHOUT pushing it
+    /// through the floor (vertical lift is up-only). Position-only — never bends
+    /// the foot rotation. No-op without a FootMotionState (test/position contexts)
+    /// or with literal gains (1.0). Operates in the solver frame BEFORE the mapper,
+    /// exactly like the hip sway, so the single downstream X-negate/Z-flip neither
+    /// double-applies nor cancels it.
+    private func applyFootAdjustments(_ foot: VRJoint, type: JointType,
+                                      rawAnkle: SIMD3<Float>, scale: Float) -> VRJoint {
+        guard let fms = footMotionState else { return foot }
+        let (neutralRaw, swing) = fms.update(type, rawAnkle: rawAnkle)
+        let neutral = solverPosition(neutralRaw, scale: scale)   // same frame as foot.position
+        var j = foot
+
+        let strideGain = settings.stepStrideCoefficientF
+        let liftGain = settings.stepLiftCoefficientF
+
+        // Horizontal stride (X lateral, Z fore/aft): deadband, then (gain-1)·swing.
+        let dX = applyDeadband(j.position.x - neutral.x, Self.footStepDeadband)
+        let dZ = applyDeadband(j.position.z - neutral.z, Self.footStepDeadband)
+        var exX = dX * (strideGain - 1) * swing
+        var exZ = dZ * (strideGain - 1) * swing
+        exX = max(-Self.footStrideClamp, min(Self.footStrideClamp, exX))
+        exZ = max(-Self.footStrideClamp, min(Self.footStrideClamp, exZ))
+
+        // Vertical lift — UP ONLY (never push a planted foot down through the floor).
+        let dY = max(0, j.position.y - neutral.y)
+        let exY = min(dY * (liftGain - 1), Self.footLiftClamp) * swing
+
+        // Smooth the delta so gain / swing transitions ease in (no foot pop).
+        let ex = fms.smoothExaggeration(type, SIMD3<Float>(exX, exY, exZ))
+        if ex.x.isFinite { j.position.x += ex.x }
+        if ex.y.isFinite { j.position.y += ex.y }
+        if ex.z.isFinite { j.position.z += ex.z }
         return j
     }
 }
