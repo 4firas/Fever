@@ -36,6 +36,13 @@ struct FeverCheck {
             exit(ok ? 0 : 1)
         }
 
+        // LIVE SIDECAR: launch the real Python sidecar and time round-trips,
+        // proving the Swift<->Python IPC end to end. `swift run FeverCheck --live-sidecar`.
+        if CommandLine.arguments.contains("--live-sidecar") {
+            let ok = await LiveSidecarCheck.run()
+            exit(ok ? 0 : 1)
+        }
+
         let t = TestRunner()
 
         testOSCMessage(t)

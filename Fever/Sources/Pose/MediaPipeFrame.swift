@@ -24,9 +24,12 @@ public final class FloorOriginLatch: @unchecked Sendable {
 /// Converts a MediaPipe sidecar reply (world landmarks, hip-origin, y-down) into the
 /// solver-frame `PoseResult` (+X right, +Y up, +Z toward camera, hip-relative metres).
 public enum MediaPipeFrame {
-    /// Default sign applied to MediaPipe world Z to match the solver frame
-    /// (+Z toward camera). Validated empirically in Phase 1 (Task 7); default +1.
-    public static let defaultZSign: Float = 1
+    /// Sign applied to MediaPipe world Z to match the solver frame (+Z toward
+    /// camera). MediaPipe world Z is "smaller = closer to camera" (so +Z points
+    /// AWAY from the camera); the solver frame is +Z TOWARD the camera, so we
+    /// negate. Confirm live: leaning toward the camera must read as +Z (forward).
+    /// If forward/back is inverted in VRChat, flip this to +1.
+    public static let defaultZSign: Float = -1
 
     /// - Parameter zSign: sign applied to world Z (the backend passes its configured value).
     public static func toSolverFrame(_ reply: SidecarReply, latch: FloorOriginLatch,
