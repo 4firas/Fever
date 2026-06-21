@@ -63,6 +63,7 @@ struct FeverCheck {
         RotationTests.run(t)
         await RotationWireStub.run(t: t)
         SidecarProtocolTests.run(t)
+        MathTests.run(t)
         MediaPipeFrameTests.run(t)
         PoseSidecarPathTests.run(t)
         await MediaPipeLandmarkerTests.run(t)
