@@ -43,6 +43,18 @@ enum SidecarProtocolTests {
             t.check(SidecarProtocol.decodeReply(body) == nil, "bad magic -> nil")
             body = Data([1, 2])
             t.check(SidecarProtocol.decodeReply(body) == nil, "short body -> nil")
+            body = Data([0,0,0,0, 0,0,0,0]) // 8 bytes, one short of the 9-byte minimum
+            t.check(SidecarProtocol.decodeReply(body) == nil, "8-byte body -> nil")
+        }
+
+        t.test("SidecarProtocol rejects a truncated found reply") {
+            var body = Data()
+            func u32(_ v: UInt32) { var x = v.littleEndian; body.append(Data(bytes: &x, count: 4)) }
+            func u8(_ v: UInt8) { var x = v; body.append(Data(bytes: &x, count: 1)) }
+            func f32(_ v: Float) { var x = v.bitPattern.littleEndian; body.append(Data(bytes: &x, count: 4)) }
+            u32(SidecarProtocol.repMagic); u32(7); u8(1) // valid found header...
+            for i in 0..<10 { f32(Float(i)) }            // ...but only 10 floats of payload (torn IPC)
+            t.check(SidecarProtocol.decodeReply(body) == nil, "truncated found body -> nil")
         }
 
         t.test("SidecarProtocol request is length-prefixed with magic") {
