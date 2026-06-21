@@ -65,6 +65,10 @@ public final class PoseSidecar: PoseInferenceService, @unchecked Sendable {
     private var seq: UInt32 = 0
     private var launchFailed = false
 
+    /// Hard cap on a reply frame's declared length. The real reply body is a
+    /// fixed 933 bytes; anything past this signals a framing desync, not a frame.
+    private static let maxReplyBytes: UInt32 = 4096
+
     public init(paths: SidecarPaths) { self.paths = paths }
 
     public func infer(rgb: Data, width: Int, height: Int, tMicros: UInt64) async -> SidecarReply? {
@@ -138,6 +142,9 @@ public final class PoseSidecar: PoseInferenceService, @unchecked Sendable {
         }
         guard let lenData = readExact(4) else { return nil }
         let len = lenData.withUnsafeBytes { $0.loadUnaligned(as: UInt32.self).littleEndian }
+        // A desynced/corrupt frame can carry a bogus length; cap it so a framing
+        // glitch becomes a clean restart instead of an OOM-scale alloc or a hang.
+        guard len <= PoseSidecar.maxReplyBytes else { teardown(); return nil }
         return readExact(Int(len))
     }
 
