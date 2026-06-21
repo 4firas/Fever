@@ -97,10 +97,18 @@ def main():
             sys.stderr.write("bad magic %x\n" % magic)
             sys.stderr.flush()
             continue
-        rgb = np.frombuffer(body, dtype=np.uint8, offset=21, count=width * height * 3)
-        rgb = rgb.reshape((height, width, 3))
-        image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
-        result = landmarker.detect_for_video(image, int(t_micros // 1000))
+        try:
+            rgb = np.frombuffer(body, dtype=np.uint8, offset=21, count=width * height * 3)
+            rgb = rgb.reshape((height, width, 3))
+            image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.ascontiguousarray(rgb))
+            result = landmarker.detect_for_video(image, int(t_micros // 1000))
+        except Exception as exc:
+            # A recoverable inference error must not crash the process: the IPC
+            # framing requires every seq to get exactly one reply. Answer found=0
+            # and keep serving so we don't trigger an EOF restart + model reload.
+            sys.stderr.write("inference error seq=%d: %r\n" % (seq, exc))
+            sys.stderr.flush()
+            result = None
         _write_frame(stdout, _pack_reply(seq, result))
     return 0
 
