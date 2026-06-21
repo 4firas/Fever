@@ -76,3 +76,72 @@ count!=33, `SidecarProtocol` short found-body); (4) dead no-op ternary in
 `FootMotionState`. Dry streak: 0/2. Continuing.
 
 ---
+
+## Iteration 2 — 2026-06-22
+
+Same workflow shape (40 raw findings → 36 candidates → judge panel → selector →
+worktree implementers → 3-skeptic refute → critic). **3 chosen, 3 survived
+(0/3 refuted each), 0 rejected.** Integration verified: build green; `swift run
+FeverCheck` = 105 tests / 941 assertions / 0 failed, reproduced over 5 consecutive
+clean runs.
+
+This round's picks were deliberately conservative (the selector favoured items the
+asset-free headless suite can fully verify): one dead-code removal + two
+test-coverage additions. The carry-over seeding from iteration 1 did **not** take
+effect (workflow logged `+0 carried-over critic seeds` — the `args` object didn't
+reach the script), but the blind fan-out independently re-discovered the same
+high-value items, so nothing was lost.
+
+### `8025d7f` Drop no-op ternary in FootMotionState swing ramp
+- **What:** `Self.ramp(lift, feet[i].seeded ? liftFull : liftFull, liftNone)` →
+  `Self.ramp(lift, liftFull, liftNone)` (both ternary arms were identical; the
+  foot is always seeded by that point anyway).
+- **Why:** A no-op conditional on the per-frame swing-ramp path invites a future
+  reader to "fix" one branch and silently shift the step/stride exaggeration.
+- **Evidence:** provable no-op (git history shows both arms were `liftFull` from
+  birth); build green; 105/941/0; STEP tests unchanged. 3/3 skeptics could not
+  refute. Commit message reworded from the implementer's to drop an inaccurate
+  "lost distinction" narrative the skeptics flagged.
+
+### `13d269d` Test decodeReply rejects truncated found-reply bodies
+- **What:** Two new assertions in `SidecarProtocolTests`: a found header followed
+  by only 10 floats (far under the 933-byte floor) must decode to nil, plus an
+  8-byte body one short of the 9-byte minimum.
+- **Why:** The exact-length floor guard in `decodeReply` is the only thing
+  stopping a torn/partial IPC frame from an out-of-bounds `f32()` read; its
+  rejection side was previously unexercised (the old bad-body test exited at the
+  earlier `>=9` guard). +1 test / +2 assertions.
+- **Evidence:** build green; 105/941/0; new test passes deterministically. 3/3
+  skeptics could not refute.
+
+### `744e48a` Add tests for oscPort clamp and stale coefficient load-clamps
+- **What:** Two new tests pinning the `oscPort` didSet clamp (70000→65535, 0→1,
+  the UInt16/NWEndpoint.Port trap guard) and the load-time `>=1.0` clamp that
+  rescues hip/step gains from stale sub-1.0 preferences (2.0/1.4/1.6/1.3).
+- **Why:** A regression removing either clamp would silently reintroduce a process
+  trap or the "hip collapses onto stance centre" bug with no test failure.
+- **Evidence:** build green; 105/941/0; +2 tests / +6 assertions. 3/3 skeptics
+  could not refute (minor noted nit: mutates `UserDefaults.standard`, matching the
+  surrounding `testTrackingDefaults` convention; no in-suite contamination).
+
+**Critic — high-confidence work remaining (true):** (1) **`MediaPipeFrame`
+floor-anchor gates feet on `presence > 0` while shoulders/hip use `visibility >
+0.5` in the same function** — and the latch runs (one-shot, until Recenter) before
+any visibility gating, so a single occluded first frame permanently biases every
+tracker's vertical position. One-line fix matching the adjacent pattern; **the
+standout correctness bug.** (2) Python sidecar still crashes on a <21-byte request
+frame (`struct.unpack_from` sits before the try/except). (3) `ensureRunning` READY
+handshake uses a blocking `availableData` read so the documented 30s deadline can
+never fire → possible permanent startup freeze. (4) `PoseSidecar` leaks an FD +
+armed `readabilityHandler` on every crash-restart.
+
+**Meta-finding (skeptics, not the critic):** the FeverCheck suite is non-deterministic
+under *concurrent* runs — the UDP wire tests bind hardcoded ports 9000/9111 and
+contend when multiple `FeverCheck` processes run at once (as in the workflow's
+parallel verification). Sequential runs are clean. Worth fixing with ephemeral
+ports to make parallel verification trustworthy.
+
+Dry streak: 0/2. Continuing — next iteration steers toward the floor-anchor
+correctness fix (now unit-testable via the existing `MediaPipeFrameTests`).
+
+---
