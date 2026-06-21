@@ -53,7 +53,7 @@ public final class FootMotionState: @unchecked Sendable {
         }
         // Swing factor from lift above the latched floor.
         let lift = p.y - feet[i].floorY
-        let raw = Self.ramp(lift, feet[i].seeded ? liftFull : liftFull, liftNone)
+        let raw = Self.ramp(lift, liftFull, liftNone)
         feet[i].swing += (raw - feet[i].swing) * swingAlpha
 
         // Slow rest tracking (XZ always; floor only while planted so a swinging
