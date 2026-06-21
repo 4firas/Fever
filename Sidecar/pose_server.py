@@ -92,6 +92,15 @@ def main():
         body = _read_frame(stdin)
         if body is None:
             break
+        # The 21-byte fixed header (magic|seq|t_micros|w|h|fmt) must be present
+        # before we can unpack it; a short frame has no decodable seq, so we
+        # can't reply — drop it and keep serving rather than crash + reload.
+        # (A header that under-declares its payload is already handled below:
+        # np.frombuffer raises inside the try/except and we answer found=0.)
+        if len(body) < 21:
+            sys.stderr.write("short frame %d\n" % len(body))
+            sys.stderr.flush()
+            continue
         magic, seq, t_micros, width, height, fmt = struct.unpack_from("<IIQHHB", body, 0)
         if magic != REQ_MAGIC:
             sys.stderr.write("bad magic %x\n" % magic)
