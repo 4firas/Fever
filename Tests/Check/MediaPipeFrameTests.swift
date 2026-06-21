@@ -58,6 +58,31 @@ enum MediaPipeFrameTests {
             t.check(pose.imagePoints.count == 33 && pose.imagePoints[0].x.isNaN, "absent image -> NaN points")
         }
 
+        t.test("MediaPipeFrame floors every landmark regardless of presence") {
+            var world = [SIMD3<Float>](repeating: .zero, count: 33)
+            let vis = [Float](repeating: 1, count: 33)        // torso guard passes
+            var pres = [Float](repeating: 1, count: 33)
+            world[BlazePose.Landmark.leftShoulder.rawValue]  = SIMD3(-0.2, -0.5, 0.0)
+            world[BlazePose.Landmark.rightShoulder.rawValue] = SIMD3( 0.2, -0.5, 0.0)
+            world[BlazePose.Landmark.leftHip.rawValue]  = SIMD3(-0.1, 0.0, 0.0)
+            world[BlazePose.Landmark.rightHip.rawValue] = SIMD3( 0.1, 0.0, 0.0)
+            world[BlazePose.Landmark.leftAnkle.rawValue]  = SIMD3(-0.1, 0.9, 0.0)
+            world[BlazePose.Landmark.rightAnkle.rawValue] = SIMD3( 0.1, 0.9, 0.0)
+            // Right hip reads as present (visibility 1) but presence drops to 0 this frame.
+            pres[BlazePose.Landmark.rightHip.rawValue] = 0
+            let reply = SidecarReply(found: true, world: world, visibility: vis, presence: pres, image: [])
+            guard let pose = MediaPipeFrame.toSolverFrame(reply, latch: FloorOriginLatch()) else {
+                t.check(false, "toSolverFrame nil"); return
+            }
+            // floor = lowest foot in solver +Y = -0.9 (ankles at MP y 0.9 -> -0.9).
+            // After floor subtraction both hips land at +0.9, regardless of presence.
+            let leftHipY = pose[.leftHip].position.y
+            let rightHipY = pose[.rightHip].position.y
+            t.close(leftHipY, 0.9, tol: 1e-4, "present hip floored to +0.9")
+            t.close(rightHipY, 0.9, tol: 1e-4, "presence-0 hip floored by the SAME amount, not left ~1m off")
+            t.close(rightHipY, leftHipY, tol: 1e-4, "both hips stay rigid (equal Y) after floor")
+        }
+
         t.test("MediaPipeFrame returns nil without a torso") {
             let world = [SIMD3<Float>](repeating: .zero, count: 33)
             let vis = [Float](repeating: 0, count: 33)  // nothing visible

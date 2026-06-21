@@ -58,12 +58,14 @@ public enum MediaPipeFrame {
         let footSlots: [BlazePose.Landmark] = [.leftAnkle, .rightAnkle, .leftHeel, .rightHeel,
                                                .leftFootIndex, .rightFootIndex]
         var lowest: Float? = nil
-        for s in footSlots where lm[s].presence > 0 {
+        for s in footSlots where present(s) {
             lowest = lowest.map { Swift.min($0, lm[s].position.y) } ?? lm[s].position.y
         }
         if let lf = lowest {
             let floor = latch.latchFloor(lf)
-            for i in 0..<33 where lm[i].presence > 0 { lm[i].position.y -= floor }
+            // Shift every landmark by the same floor (like the XZ subtraction above);
+            // gating this on presence left low-presence joints ~1m out of place.
+            for i in 0..<33 { lm[i].position.y -= floor }
         }
 
         let img = reply.image.count == 33
