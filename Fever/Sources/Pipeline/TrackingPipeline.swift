@@ -10,29 +10,29 @@ import simd
 ///
 ///   FrameSource (capture queue)  →  single-slot MAILBOX (latest frame only)
 ///     → inference WORKER (dedicated serial queue, OFF the capture queue)
-///         → PoseLandmarker      (Apple Vision 3D inference, ~12 fps ceiling)
+///         → PoseLandmarker      (MediaPipe sidecar inference, ~12 fps ceiling)
 ///         → LandmarkStabilizer  (One-Euro, 33×3)
-///         → JointSolver         (9 VRJoints in the solver/Vision frame)
-///         → QuaternionStabilizer (per-joint SLERP smoothing)
+///         → JointSolver         (9 VRJoints in the solver frame)
+///         → RotationRebaser     (rest-relative + SLERP smoothing)
 ///         → CoordinateMapper    (single VRChat conversion)
 ///         → TrackerAssembler    (fixed numbered slots + head ref)
 ///         → OSCSender (actor)   (/position + /rotation → host:9000)
 ///     → THROTTLED telemetry (≈12 Hz) → @MainActor @Observable (the UI)
 ///
 /// ── Why this layout (the performance fix) ────────────────────────────────────
-/// Vision's `VNDetectHumanBodyPose3DRequest.perform` has a hard ~78 ms (~12 fps)
-/// ceiling on this machine. Running it INLINE on the camera frames queue (the old
-/// design, with a `DispatchSemaphore` wait) stalled the capture graph and the
-/// preview to ~5 fps. The fix DECOUPLES the two:
+/// MediaPipe pose inference (the Python sidecar, over length-prefixed IPC) has a
+/// hard ~78 ms (~12 fps) ceiling on this machine. Running it INLINE on the camera
+/// frames queue (the old design, with a `DispatchSemaphore` wait) stalled the
+/// capture graph and the preview to ~5 fps. The fix DECOUPLES the two:
 ///
 ///   • The camera delegate only stashes the latest `CVPixelBuffer` into a
 ///     single-slot mailbox and returns immediately — the capture queue and the
 ///     `AVCaptureVideoPreviewLayer` preview stay smooth (full camera fps).
 ///   • A dedicated inference worker (one long-lived serial queue) pulls the
-///     LATEST frame, runs Vision, and processes it. Any frames that arrive while
-///     it is busy overwrite the mailbox slot and are dropped (process-latest-
-///     only). Pose therefore updates at Vision's ~12 fps without ever backing up
-///     capture.
+///     LATEST frame, runs the sidecar, and processes it. Any frames that arrive
+///     while it is busy overwrite the mailbox slot and are dropped (process-
+///     latest-only). Pose therefore updates at the sidecar's ~12 fps without ever
+///     backing up capture.
 ///   • Telemetry is coalesced and published to the `@MainActor @Observable` at
 ///     most ~12 Hz, so SwiftUI never re-renders per frame.
 ///   • OSC streams on every new pose AND on a steady repeat tick (the last solved

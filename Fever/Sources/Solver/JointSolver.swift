@@ -3,14 +3,14 @@ import simd
 /// Converts 33 stabilized BlazePose landmarks → 9 `VRJoint` values.
 ///
 /// IMPORTANT — single coordinate frame: this solver works **entirely in the
-/// solver's (Vision-derived) frame** and emits joints in that SAME frame. The
-/// input landmark positions are Apple-Vision metric, hip-root-relative meters
-/// (the `PoseAdapter` packs Vision's 17 joints into the 33-slot BlazePose
-/// array, synthesizing heels/ears). This solver does NOT flip handedness, does
-/// NOT flip Y, does NOT scale to real-world meters, and does NOT convert to
-/// VRChat space. `CoordinateMapper` performs the single authoritative VRChat
-/// conversion exactly once downstream (Z-flip, user-height scale, horizontal
-/// mirror, quaternion → Unity ZXY euler degrees).
+/// solver frame** and emits joints in that SAME frame. The input landmark
+/// positions are metric, hip-root-relative meters (the MediaPipe sidecar's 33
+/// world landmarks, mapped into the solver frame by `MediaPipeFrame`: X kept,
+/// Y negated down→up, Z scaled by `zSign`). This solver does NOT flip
+/// handedness, does NOT flip Y, does NOT scale to real-world meters, and does
+/// NOT convert to VRChat space. `CoordinateMapper` performs the single
+/// authoritative VRChat conversion exactly once downstream (Z-flip, user-height
+/// scale, horizontal mirror, quaternion → Unity ZXY euler degrees).
 ///
 /// Each joint's `rotation` is a world-space (solver-frame) quaternion derived
 /// from an orthonormal frame of landmark triplets, with degenerate/collinear

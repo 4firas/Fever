@@ -22,8 +22,9 @@ public enum JointType: String, CaseIterable, Codable, Sendable {
 
 /// A solved VR joint ready for coordinate mapping + OSC transmission.
 /// Carries position in meters and orientation as a world-space quaternion in
-/// the solver's (Vision-derived) frame; `CoordinateMapper` performs the single
-/// authoritative conversion into VRChat space (Z-flip, meters scale, ZXY euler).
+/// the solver frame (built from the MediaPipe sidecar's world landmarks by
+/// `MediaPipeFrame`); `CoordinateMapper` performs the single authoritative
+/// conversion into VRChat space (Z-flip, meters scale, ZXY euler).
 public struct VRJoint: Sendable {
     public let type: JointType
     public var position: SIMD3<Float>     // meters, solver frame

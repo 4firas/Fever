@@ -1,12 +1,12 @@
 import simd
 
 /// CoordinateMapper — the single authoritative conversion from the solver's
-/// (Apple Vision–derived) coordinate frame into VRChat / Unity world space.
+/// coordinate frame into VRChat / Unity world space.
 ///
 /// This module is the **make-or-break correctness step** of the whole pipeline
 /// (per the locked spec verdicts). Every position and every orientation that
 /// Fever puts on the OSC wire passes through here exactly once, *after* the
-/// JointSolver and QuaternionStabilizer have produced joints in a single
+/// JointSolver and RotationRebaser have produced joints in a single
 /// consistent solver frame and *before* the TrackerAssembler packs them into
 /// `/tracking/trackers/{slot}/position` and `/rotation` messages.
 ///
@@ -14,23 +14,24 @@ import simd
 /// and no hidden state, so it is trivially unit-testable.
 ///
 /// ── Frames ───────────────────────────────────────────────────────────────
-/// Solver / Vision frame:  RIGHT-handed, hip-root-relative METERS,
+/// Solver frame:           RIGHT-handed, hip-root-relative METERS,
 ///                         +X = right, +Y = up, +Z = toward the camera.
-///   (Apple `VNHumanBodyPose3DObservation` point.position is metric and
-///    right-handed; positions are relative to the hip "root" joint.)
+///   (Derived from the MediaPipe sidecar's world landmarks by `MediaPipeFrame`:
+///    those are metric, hip-origin, Y-DOWN, so the frame builder keeps X, negates
+///    Y (down→up), and applies `z * zSign` to orient +Z toward the camera.)
 ///
 /// VRChat / Unity frame:   LEFT-handed, world-space METERS,
 ///                         +X = right, +Y = up, +Z = forward (away from camera).
 ///
 /// ── Position transform ──────────────────────────────────────────────────
-/// 1. Negate Z  → flips right-handed to left-handed (Vision +Z "toward camera"
+/// 1. Negate Z  → flips right-handed to left-handed (solver +Z "toward camera"
 ///    becomes VRChat +Z "forward").
 /// 2. Mirror X (front camera) → a front-facing webcam shows a mirror image, so
 ///    the user's real right hand appears on the left of the frame; negate X so
 ///    the avatar moves the same side as the user. Gated by `mirrorHorizontally`.
-/// 3. Scale uniformly by `userHeightMeters / referenceHeightMeters`. Without a
-///    depth sensor Vision assumes a 1.8 m reference height (heightEstimation ==
-///    .reference), so we rescale to the user's true height to make 1.0 == 1 m.
+/// 3. Scale uniformly by `userHeightMeters / referenceHeightMeters`. The solver
+///    frame is metric but anchored to an anthropometric reference stature
+///    (1.8 m), so we rescale to the user's true height to make 1.0 == 1 m.
 ///
 ///   x' = s · (mirror ? -1 : 1) · x
 ///   y' = s · y
@@ -96,11 +97,12 @@ import simd
 public struct CoordinateMapper: Sendable, Equatable {
 
     /// The user's real-world standing height in meters (used as the numerator
-    /// of the metric rescale; corrects Vision's 1.8 m reference assumption).
+    /// of the metric rescale; corrects the 1.8 m reference stature).
     public var userHeightMeters: Float
 
-    /// The reference height Vision assumes without depth (1.8 m). Denominator
-    /// of the metric rescale. Guarded against zero / non-finite values.
+    /// The anthropometric reference stature the solver frame is anchored to
+    /// (1.8 m). Denominator of the metric rescale. Guarded against zero /
+    /// non-finite values.
     public var referenceHeightMeters: Float
 
     /// Whether to mirror horizontally (negate X) for the front-facing webcam,
