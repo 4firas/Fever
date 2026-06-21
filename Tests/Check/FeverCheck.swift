@@ -651,6 +651,40 @@ struct FeverCheck {
                     "head must NOT be a numbered enabled tracker")
         }
 
+        t.test("oscPort didSet clamps to the valid UDP range") {
+            let cfg = TrackingConfig()
+            cfg.oscPort = 70000
+            t.check(cfg.oscPort == 65535,
+                    "oscPort above 65535 must clamp to 65535: \(cfg.oscPort)")
+            cfg.oscPort = 0
+            t.check(cfg.oscPort == 1,
+                    "oscPort below 1 must clamp to 1: \(cfg.oscPort)")
+        }
+
+        t.test("Stale sub-1.0 coefficients clamp up to the tasteful defaults on load") {
+            // A persisted value below 1.0 is a stale rotation-era setting (old
+            // -1...1 range / 0.0 default) that would collapse the hip/feet onto
+            // their neutral. Loading must clamp it back up to the position-gain
+            // default rather than honoring the inert value.
+            UserDefaults.standard.set(0.0, forKey: "hipExaggerateCoefficient")
+            UserDefaults.standard.set(0.0, forKey: "hipTwistCoefficient")
+            UserDefaults.standard.set(0.0, forKey: "stepStrideCoefficient")
+            UserDefaults.standard.set(0.0, forKey: "stepLiftCoefficient")
+            let cfg = TrackingConfig()
+            t.close(Float(cfg.hipExaggerateCoefficient), 2.0, tol: 1e-4,
+                    "stale hipExaggerateCoefficient must clamp to 2.0: \(cfg.hipExaggerateCoefficient)")
+            t.close(Float(cfg.hipTwistCoefficient), 1.4, tol: 1e-4,
+                    "stale hipTwistCoefficient must clamp to 1.4: \(cfg.hipTwistCoefficient)")
+            t.close(Float(cfg.stepStrideCoefficient), 1.6, tol: 1e-4,
+                    "stale stepStrideCoefficient must clamp to 1.6: \(cfg.stepStrideCoefficient)")
+            t.close(Float(cfg.stepLiftCoefficient), 1.3, tol: 1e-4,
+                    "stale stepLiftCoefficient must clamp to 1.3: \(cfg.stepLiftCoefficient)")
+            UserDefaults.standard.removeObject(forKey: "hipExaggerateCoefficient")
+            UserDefaults.standard.removeObject(forKey: "hipTwistCoefficient")
+            UserDefaults.standard.removeObject(forKey: "stepStrideCoefficient")
+            UserDefaults.standard.removeObject(forKey: "stepLiftCoefficient")
+        }
+
         t.test("Slot map covers all 8 body trackers, head excluded") {
             let map = TrackerAssembler.defaultSlotMap
             let body: [JointType] = [.hip, .chest,
