@@ -145,3 +145,78 @@ Dry streak: 0/2. Continuing — next iteration steers toward the floor-anchor
 correctness fix (now unit-testable via the existing `MediaPipeFrameTests`).
 
 ---
+
+## Iteration 3 — 2026-06-22
+
+The selector picked exactly the right work this round (correctness over
+cleanup, per the sharpened steering): **2 correctness fixes + 1 singularity
+test**. Two operational notes:
+
+- **First attempt was an infra miss, not a dry result.** The harness
+  `isolation:'worktree'` could not find the repo from this session's CWD (which
+  resets to the non-repo home dir), so all three implementers failed at worktree
+  creation — zero code touched. Durable fix: implementers now create their own
+  worktree via absolute `git -C` commands (CWD-independent). The run was then
+  *resumed* (cached analysis reused) and completed normally.
+- Carry-forward now works via a hardcoded fallback (`+4 carried-over critic
+  seeds`) after `args` failed to thread through in iter 2.
+
+Integration verified on-branch: build green; `swift run FeverCheck` = **111
+tests / 961 assertions / 0 failed**; real MediaPipe sidecar **survived a 10-byte
+short frame and answered the next valid request** (live end-to-end probe).
+
+### `bfd55bc` Fix floor-anchor leaving low-presence joints ~1m out of place
+- **What:** In `MediaPipeFrame.toSolverFrame`, the per-landmark vertical floor
+  shift was `for i in 0..<33 where lm[i].presence > 0` — gated, while the XZ
+  origin subtraction above is unconditional. Make the Y shift unconditional, and
+  change the lowest-foot search gate from `presence > 0` to `present()`
+  (visibility > 0.5, matching the torso gating).
+- **Why:** MediaPipe emits all 33 landmarks every frame; a body landmark whose
+  presence dips to 0 (distinct from visibility) kept its raw Y while the rest of
+  the skeleton shifted by the latched floor (~standing height), teleporting that
+  joint ~1m and reintroducing the 1-frame limb-spaz the pipeline suppresses.
+  Because the latch is one-shot until Recenter, a bad first frame biases the
+  whole session.
+- **Evidence:** build green; 111/961; new regression test confirmed to FAIL on
+  old code (`got -0.0, want 0.9`) and PASS on the fix. 3/3 skeptics could not refute.
+
+### `4ac3461` Add direct unit tests for frameFromTwoAxes singularity guard
+- **What:** New `Tests/Check/MathTests.swift` (+ one wire-up line) directly
+  covering the degenerate/parallel-axis hold-last branch of `frameFromTwoAxes`
+  (the guard the rotation rework is built around): parallel/anti-parallel/zero
+  axes return holdLast unchanged; a perpendicular pair builds a finite, unit,
+  right-handed orthonormal frame.
+- **Why:** Integration tests deliberately avoid the singular region, so flipping
+  the cross-length threshold would silently reintroduce the 90° limb snap.
+- **Evidence:** test-only (source untouched); build green; 111/961; the implementer
+  confirmed a threshold-flip mutation fails the perpendicular test. 3/3 skeptics
+  could not refute. (Corrected the implementer's stale "+8 tests/+25 assertions"
+  accounting in the commit message — actual is +5 tests / +17 assertions.)
+
+### `b1edcd2` Guard sidecar header parse against short request frames
+- **What:** In `pose_server.py`, drop a request body shorter than the 21-byte
+  fixed header (no decodable seq → can't reply) instead of crashing in
+  `struct.unpack_from`, which runs before the recoverable-error try/except.
+- **Why:** A framing hiccup that delivered a sub-header frame killed the child →
+  EOF → restart + multi-second model reload (a reload loop on persistent desync).
+- **Evidence:** build green; py_compile OK; 111/961; **live probe: the real
+  sidecar survived a 10-byte frame and answered the next valid request**.
+- **Adversarial caveat acted on:** the implementer also added a *second* guard
+  (truncated-payload `continue`). One skeptic correctly refuted it: the existing
+  try/except already answers `found=0` for an under-declared payload, so an early
+  `continue` with no reply would instead hang the Swift reader (no read timeout).
+  **I dropped the second guard** and kept only the crash-preventing first guard;
+  the truncated-payload case keeps its graceful `found=0` path.
+
+**Critic — high-confidence work remaining (true):** (1) `PoseSidecar` restart
+leaks a stderr FD + dispatch read-source and never reaps the SIGTERM'd child
+(teardown only nils 3 refs) — compounds with the now-hardened restart paths
+toward EMFILE/zombies; (2) the L/R anti-swap in `LandmarkConsistency` corrects
+ankles+knees but NOT heels/foot-indices, so a corrected foot derives orientation
+from the *other* foot's heel→toe vector in the profile-transpose case it targets
+(real correctness gap, headless-testable); (3) `safeSlerp`/`angleBetween`
+NaN/zero-length guards have no direct tests.
+
+Dry streak: 0/2. Continuing.
+
+---
