@@ -27,6 +27,34 @@ enum LandmarkConsistencyTests {
                     "right ankle re-assigned to its side (x>0): \(out[.rightAnkle].position.x)")
         }
 
+        t.test("CONSISTENCY: a swapped leg moves heel + foot-index in lockstep with the ankle") {
+            let c = LandmarkConsistency()
+            // Frame 1 establishes prev: whole LEFT foot at −x, whole RIGHT foot at +x.
+            _ = c.process(pose([(.leftAnkle,      SIMD3(-0.10, -0.80, 0), 0.9),
+                                (.leftHeel,       SIMD3(-0.10, -0.85, -0.05), 0.9),
+                                (.leftFootIndex,  SIMD3(-0.10, -0.85,  0.10), 0.9),
+                                (.rightAnkle,     SIMD3(0.10, -0.80, 0), 0.9),
+                                (.rightHeel,      SIMD3(0.10, -0.85, -0.05), 0.9),
+                                (.rightFootIndex, SIMD3(0.10, -0.85,  0.10), 0.9)]))
+            // Frame 2: MediaPipe TRANSPOSED every L/R foot landmark together.
+            let out = c.process(pose([(.leftAnkle,      SIMD3(0.10, -0.80, 0), 0.9),
+                                      (.leftHeel,       SIMD3(0.10, -0.85, -0.05), 0.9),
+                                      (.leftFootIndex,  SIMD3(0.10, -0.85,  0.10), 0.9),
+                                      (.rightAnkle,     SIMD3(-0.10, -0.80, 0), 0.9),
+                                      (.rightHeel,      SIMD3(-0.10, -0.85, -0.05), 0.9),
+                                      (.rightFootIndex, SIMD3(-0.10, -0.85,  0.10), 0.9)]))
+            // The corrected ankle must drag its OWN heel + toe back to the same side,
+            // so solveFoot reads a self-consistent heel→toe vector (not the opposite foot's).
+            t.check(out[.leftAnkle].position.x < 0 && out[.leftHeel].position.x < 0
+                        && out[.leftFootIndex].position.x < 0,
+                    "left foot re-assigned as a unit (ankle/heel/toe all x<0): "
+                        + "ankle=\(out[.leftAnkle].position.x) heel=\(out[.leftHeel].position.x) toe=\(out[.leftFootIndex].position.x)")
+            t.check(out[.rightAnkle].position.x > 0 && out[.rightHeel].position.x > 0
+                        && out[.rightFootIndex].position.x > 0,
+                    "right foot re-assigned as a unit (ankle/heel/toe all x>0): "
+                        + "ankle=\(out[.rightAnkle].position.x) heel=\(out[.rightHeel].position.x) toe=\(out[.rightFootIndex].position.x)")
+        }
+
         t.test("CONSISTENCY: a stable L/R pair is NOT swapped (small real motion)") {
             let c = LandmarkConsistency()
             _ = c.process(pose([(.leftAnkle, SIMD3(-0.10, -0.8, 0), 0.9),

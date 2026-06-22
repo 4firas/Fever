@@ -26,15 +26,20 @@ public final class LandmarkConsistency: @unchecked Sendable {
     private var engaged = [Bool](repeating: true, count: 33)
     private var seeded = false
 
-    /// L/R landmark pairs that can transpose: hips, knees, ankles, shoulders,
-    /// elbows, wrists. (Feet heels/toes follow their ankle and are not paired here.)
+    /// L/R landmark pairs that can transpose: hips, knees, ankles, heels, toes,
+    /// shoulders, elbows, wrists. Heel + foot-index are paired alongside the ankle
+    /// so a leg swap moves the whole foot (ankle + knee + heel + toe) as one rigid
+    /// unit — otherwise a corrected foot solves its orientation from the OPPOSITE
+    /// foot's heel→toe vector and points the wrong way.
     private static let pairs: [(Int, Int)] = [
-        (BlazePose.Landmark.leftHip.rawValue,      BlazePose.Landmark.rightHip.rawValue),
-        (BlazePose.Landmark.leftKnee.rawValue,     BlazePose.Landmark.rightKnee.rawValue),
-        (BlazePose.Landmark.leftAnkle.rawValue,    BlazePose.Landmark.rightAnkle.rawValue),
-        (BlazePose.Landmark.leftShoulder.rawValue, BlazePose.Landmark.rightShoulder.rawValue),
-        (BlazePose.Landmark.leftElbow.rawValue,    BlazePose.Landmark.rightElbow.rawValue),
-        (BlazePose.Landmark.leftWrist.rawValue,    BlazePose.Landmark.rightWrist.rawValue),
+        (BlazePose.Landmark.leftHip.rawValue,       BlazePose.Landmark.rightHip.rawValue),
+        (BlazePose.Landmark.leftKnee.rawValue,      BlazePose.Landmark.rightKnee.rawValue),
+        (BlazePose.Landmark.leftAnkle.rawValue,     BlazePose.Landmark.rightAnkle.rawValue),
+        (BlazePose.Landmark.leftHeel.rawValue,      BlazePose.Landmark.rightHeel.rawValue),
+        (BlazePose.Landmark.leftFootIndex.rawValue, BlazePose.Landmark.rightFootIndex.rawValue),
+        (BlazePose.Landmark.leftShoulder.rawValue,  BlazePose.Landmark.rightShoulder.rawValue),
+        (BlazePose.Landmark.leftElbow.rawValue,     BlazePose.Landmark.rightElbow.rawValue),
+        (BlazePose.Landmark.leftWrist.rawValue,     BlazePose.Landmark.rightWrist.rawValue),
     ]
 
     /// Swap only when clearly cheaper than keeping (hysteresis band stops chatter).
