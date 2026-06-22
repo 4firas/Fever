@@ -10,7 +10,7 @@ import AppKit
 /// launch explicitly via `FeverApp.main()` for the `--ui` path.
 ///
 /// Usage:
-///   Fever                         headless: camera + Vision 3D pose, OSC -> 127.0.0.1:9000
+///   Fever                         headless: camera + MediaPipe pose (Python sidecar), OSC -> 127.0.0.1:9000
 ///   Fever --ui                    launch the SwiftUI (Liquid Glass) window app
 ///   Fever --stub                  headless, hardware-free: synthetic frames + synthetic pose
 ///   Fever --no-osc                run the pipeline + telemetry, transmit nothing
@@ -47,7 +47,7 @@ enum FeverMain {
 
         // SINGLE-INSTANCE GUARD (GUI/bundle only): if another Fever is
         // already running, focus it and exit. Stacked instances each spin up
-        // their own camera session + Vision/Neural-Engine pipeline, fighting for
+        // their own camera session + MediaPipe sidecar pipeline, fighting for
         // the same hardware and collapsing frame rate — the cause of the earlier
         // "ghost process / 3fps". CLI/headless runs are exempt (you may want
         // several).
@@ -69,7 +69,7 @@ enum FeverMain {
 
         if useUI {
             // The SwiftUI scene owns its own TrackingConfig + TrackingPipeline
-            // (live camera + Vision). It reads the same persisted host/port we
+            // (live camera + MediaPipe sidecar). It reads the same persisted host/port we
             // just wrote above. This call does not return until the app quits.
             FeverApp.main()
             return
@@ -133,7 +133,7 @@ enum FeverMain {
 
     private static func printUsage() {
         let usage = """
-        Fever — webcam full-body VR tracker (Apple Vision 3D pose -> VRChat OSC)
+        Fever — webcam full-body VR tracker (MediaPipe pose (Python sidecar) -> VRChat OSC)
 
         USAGE:
           Fever [options]
@@ -150,7 +150,7 @@ enum FeverMain {
         DEFAULT (no options):
           Launched as Fever.app (Finder/Dock) -> opens the GUI window.
           Run as a bare CLI binary -> headless live tracking (built-in camera +
-          Vision 3D body pose, streaming VRChat trackers to 127.0.0.1:9000).
+          MediaPipe sidecar pose, streaming VRChat trackers to 127.0.0.1:9000).
         """
         print(usage)
     }
