@@ -43,6 +43,10 @@ enum Theme {
     /// Calm blue (#5f7faf).
     static let calmBlue         = Color(hex: 0x5f7faf)
 
+    /// PinoQuest-style skeleton joint coloring: cyan = body-LEFT, orange = body-RIGHT.
+    static let trackerLeft      = Color(hex: 0x4fd6e6)
+    static let trackerRight     = Color(hex: 0xff9d42)
+
     // MARK: Type scale (12–16pt, clear weight hierarchy)
 
     /// Card / panel titles.

@@ -109,6 +109,21 @@ public final class TrackingConfig {
         didSet { UserDefaults.standard.set(rotationSmoothing, forKey: Keys.rotationSmoothing) }
     }
 
+    // MARK: - Leveling / Body Stabilizer (PinoQuest-style gravity leveling)
+    /// Continuous re-leveling. When ON, the gravity-leveling datum is continuously
+    /// re-estimated and low-pass-filtered, tracking slow camera/posture drift; when
+    /// OFF, the datum frozen at the last Re-center is held (baseline leveling still
+    /// applies either way). DEFAULT false. Shown to the user as "Body Stabilizer".
+    public var bodyStabilizer: Bool {
+        didSet { UserDefaults.standard.set(bodyStabilizer, forKey: Keys.bodyStabilizer) }
+    }
+    /// Whether leveling also corrects camera ROLL (about the view axis), not just
+    /// pitch. DEFAULT false — a desk webcam is rarely rolled, and roll estimated from
+    /// a possibly-leaning user adds noise. Exposed for tilted / handheld rigs.
+    public var levelIncludeRoll: Bool {
+        didSet { UserDefaults.standard.set(levelIncludeRoll, forKey: Keys.levelIncludeRoll) }
+    }
+
     // MARK: - Body tweaks
     public var jointSize: Double {
         didSet { UserDefaults.standard.set(jointSize, forKey: Keys.jointSize) }
@@ -221,6 +236,9 @@ public final class TrackingConfig {
         stabilizerBeta = d.object(forKey: Keys.stabilizerBeta) as? Double ?? 0.007
         rotationSmoothing = d.object(forKey: Keys.rotationSmoothing) as? Double ?? 0.5
 
+        bodyStabilizer = d.object(forKey: Keys.bodyStabilizer) as? Bool ?? false
+        levelIncludeRoll = d.object(forKey: Keys.levelIncludeRoll) as? Bool ?? false
+
         jointSize = d.object(forKey: Keys.jointSize) as? Double ?? 1.0
         // Tasteful out-of-the-box exaggeration: a bit of intentional liveliness,
         // not zero (stiff) and not cartoonish. Lateral sway 2.0x, fwd/back 1.4x.
@@ -257,6 +275,8 @@ public final class TrackingConfig {
         static let stabilizerMinCutoff = "stabilizerMinCutoff"
         static let stabilizerBeta = "stabilizerBeta"
         static let rotationSmoothing = "rotationSmoothing"
+        static let bodyStabilizer = "bodyStabilizer"
+        static let levelIncludeRoll = "levelIncludeRoll"
         static let jointSize = "jointSize"
         static let hipExaggerateCoefficient = "hipExaggerateCoefficient"
         static let hipTwistCoefficient = "hipTwistCoefficient"

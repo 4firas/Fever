@@ -83,6 +83,64 @@ enum MediaPipeFrameTests {
             t.close(rightHipY, leftHipY, tol: 1e-4, "both hips stay rigid (equal Y) after floor")
         }
 
+        t.test("MediaPipeFrame default level is byte-identical (identity passthrough)") {
+            // Same input as the y-negate test; the defaulted level=identity path must
+            // produce exactly the un-leveled result (the load-bearing no-change invariant).
+            var world = [SIMD3<Float>](repeating: .zero, count: 33)
+            let vis = [Float](repeating: 1, count: 33)
+            world[BlazePose.Landmark.leftShoulder.rawValue]  = SIMD3(-0.2, -0.5, 0.1)
+            world[BlazePose.Landmark.rightShoulder.rawValue] = SIMD3( 0.2, -0.5, 0.1)
+            world[BlazePose.Landmark.leftHip.rawValue]  = SIMD3(-0.1, 0.0, 0.0)
+            world[BlazePose.Landmark.rightHip.rawValue] = SIMD3( 0.1, 0.0, 0.0)
+            world[BlazePose.Landmark.leftAnkle.rawValue]  = SIMD3(-0.1, 0.9, 0.0)
+            world[BlazePose.Landmark.rightAnkle.rawValue] = SIMD3( 0.1, 0.9, 0.0)
+            let reply = SidecarReply(found: true, world: world, visibility: vis, presence: vis, image: [])
+            let a = MediaPipeFrame.toSolverFrame(reply, latch: FloorOriginLatch())
+            let b = MediaPipeFrame.toSolverFrame(reply, latch: FloorOriginLatch(),
+                                                 level: LevelEstimator.identity)
+            guard let a, let b else { t.check(false, "nil"); return }
+            var same = true
+            for i in 0..<33 { if a.landmarks[i].position != b.landmarks[i].position { same = false } }
+            t.check(same, "default param == explicit identity, bit-for-bit")
+        }
+
+        t.test("MediaPipeFrame applies leveling BEFORE floor/origin (tilted camera → upright)") {
+            // Forward-pitched capture: shoulders pushed toward the lens (+z, MP y-down).
+            var world = [SIMD3<Float>](repeating: .zero, count: 33)
+            let vis = [Float](repeating: 1, count: 33)
+            world[BlazePose.Landmark.leftShoulder.rawValue]  = SIMD3(-0.2, -0.5, 0.3)
+            world[BlazePose.Landmark.rightShoulder.rawValue] = SIMD3( 0.2, -0.5, 0.3)
+            world[BlazePose.Landmark.leftHip.rawValue]  = SIMD3(-0.1, 0.0, 0.0)
+            world[BlazePose.Landmark.rightHip.rawValue] = SIMD3( 0.1, 0.0, 0.0)
+            world[BlazePose.Landmark.leftAnkle.rawValue]  = SIMD3(-0.1, 0.9, 0.0)
+            world[BlazePose.Landmark.rightAnkle.rawValue] = SIMD3( 0.1, 0.9, 0.0)
+            let reply = SidecarReply(found: true, world: world, visibility: vis, presence: vis, image: [])
+
+            // Control: with no leveling the spine leans toward the camera (shoulder z ≈ 0.3).
+            guard let raw = MediaPipeFrame.toSolverFrame(reply, latch: FloorOriginLatch()) else {
+                t.check(false, "nil raw"); return
+            }
+            let rawShZ = (raw[.leftShoulder].position.z + raw[.rightShoulder].position.z) * 0.5
+            t.check(abs(rawShZ) > 0.25, "control: un-leveled shoulders lean toward camera (z≈0.3, got \(rawShZ))")
+
+            // Derive leveling from the un-leveled solver-frame spine, re-run with it.
+            let neck = (raw[.leftShoulder].position + raw[.rightShoulder].position) * 0.5
+            let midHip = (raw[.leftHip].position + raw[.rightHip].position) * 0.5
+            let level = LevelEstimator.levelingQuaternion(neck: neck, midHip: midHip, includeRoll: false)
+            guard let lev = MediaPipeFrame.toSolverFrame(reply, latch: FloorOriginLatch(), level: level) else {
+                t.check(false, "nil leveled"); return
+            }
+            let levShZ = (lev[.leftShoulder].position.z + lev[.rightShoulder].position.z) * 0.5
+            let levShX = (lev[.leftShoulder].position.x + lev[.rightShoulder].position.x) * 0.5
+            let hipMidX = (lev[.leftHip].position.x + lev[.rightHip].position.x) * 0.5
+            t.close(levShZ, 0, tol: 1e-3, "leveled shoulders sit directly above hips (z→0)")
+            t.close(levShX, hipMidX, tol: 1e-3, "leveled shoulders centred over hips (x)")
+            t.check(lev[.leftShoulder].position.y > lev[.leftHip].position.y, "shoulders above hips after leveling")
+            // Feet still floored to ~0 along the now-true-vertical Y.
+            let footY = Swift.min(lev[.leftAnkle].position.y, lev[.rightAnkle].position.y)
+            t.close(footY, 0, tol: 1e-3, "lowest foot floored to ~0 along leveled gravity")
+        }
+
         t.test("MediaPipeFrame returns nil without a torso") {
             let world = [SIMD3<Float>](repeating: .zero, count: 33)
             let vis = [Float](repeating: 0, count: 33)  // nothing visible

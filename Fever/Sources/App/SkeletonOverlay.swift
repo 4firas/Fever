@@ -26,6 +26,21 @@ struct SkeletonOverlay: View {
     /// 33-slot, screen-normalized RAW landmark points; NaN entries are absent.
     let points: [SIMD2<Float>]
 
+    /// The leveled reference box (PinoQuest-style). Drawn only when `valid`; its
+    /// orientation tracks the torso tilt (level on a turn, angled on a bend).
+    var box: LeveledBox = .invalid
+
+    /// Animated 0→1 perimeter draw-in, replayed when the box (re)acquires and run
+    /// back to 0 (vanish) when the reference is lost. Manual `State` storage — this
+    /// CLT-only toolchain can't load the `@State` macro plugin (same hand-expansion
+    /// as `FeverApp._config`): the `State<T>` is the stored property, a computed
+    /// accessor exposes its `wrappedValue`.
+    private var _drawProgress = State(initialValue: 0.0)
+    private var drawProgress: Double {
+        get { _drawProgress.wrappedValue }
+        nonmutating set { _drawProgress.wrappedValue = newValue }
+    }
+
     /// Locked camera aspect ratio (1280x720, 16:9). Used to reproduce the
     /// preview layer's aspect-fit letterbox so the overlay lands on the body.
     private let cameraAspect: CGFloat = 1280.0 / 720.0
@@ -46,8 +61,45 @@ struct SkeletonOverlay: View {
         (.rightHip, .rightKnee),
         (.rightKnee, .rightAnkle),
         (.nose, .leftEar),
-        (.nose, .rightEar)
+        (.nose, .rightEar),
+        // Face mesh
+        (.leftEar, .leftEye), (.leftEye, .nose),
+        (.rightEar, .rightEye), (.rightEye, .nose),
+        (.mouthLeft, .mouthRight),
+        // Finger fans (wrist → thumb / index / pinky, plus the index–pinky web)
+        (.leftWrist, .leftThumb), (.leftWrist, .leftIndex),
+        (.leftWrist, .leftPinky), (.leftIndex, .leftPinky),
+        (.rightWrist, .rightThumb), (.rightWrist, .rightIndex),
+        (.rightWrist, .rightPinky), (.rightIndex, .rightPinky),
+        // Feet
+        (.leftAnkle, .leftHeel), (.leftHeel, .leftFootIndex), (.leftAnkle, .leftFootIndex),
+        (.rightAnkle, .rightHeel), (.rightHeel, .rightFootIndex), (.rightAnkle, .rightFootIndex)
     ]
+
+    /// Body side of a landmark, for PinoQuest-style joint coloring.
+    private enum Side { case left, right, center }
+    private static func side(_ l: BlazePose.Landmark) -> Side {
+        switch l {
+        case .nose: return .center
+        case .leftEyeInner, .leftEye, .leftEyeOuter, .leftEar, .mouthLeft,
+             .leftShoulder, .leftElbow, .leftWrist, .leftPinky, .leftIndex, .leftThumb,
+             .leftHip, .leftKnee, .leftAnkle, .leftHeel, .leftFootIndex:
+            return .left
+        default:
+            return .right
+        }
+    }
+    private static func dotColor(_ l: BlazePose.Landmark) -> Color {
+        switch side(l) {
+        case .left:   return Theme.trackerLeft
+        case .right:  return Theme.trackerRight
+        case .center: return .white
+        }
+    }
+    /// Face-cluster landmarks (nose…mouth) get smaller dots for a denser mesh look.
+    private static func isFace(_ l: BlazePose.Landmark) -> Bool {
+        l.rawValue <= BlazePose.Landmark.mouthRight.rawValue   // indices 0...10
+    }
 
     var body: some View {
         Canvas { context, size in
@@ -86,26 +138,24 @@ struct SkeletonOverlay: View {
                 return CGPoint(x: sx, y: sy)
             }
 
-            // Live detection bounding box (PinoFBT-style): the padded min/max of
-            // all present joints — the region the body currently occupies. It
-            // follows you because it IS the detected-body extent; purely visual.
-            var minX = CGFloat.greatestFiniteMagnitude, minY = CGFloat.greatestFiniteMagnitude
-            var maxX = -CGFloat.greatestFiniteMagnitude, maxY = -CGFloat.greatestFiniteMagnitude
-            var hasAny = false
-            for l in BlazePose.Landmark.allCases {
-                guard let p = project(l) else { continue }
-                hasAny = true
-                minX = min(minX, p.x); minY = min(minY, p.y)
-                maxX = max(maxX, p.x); maxY = max(maxY, p.y)
-            }
-            if hasAny {
-                let pad: CGFloat = 18
-                let box = CGRect(x: minX - pad, y: minY - pad,
-                                 width: (maxX - minX) + 2 * pad,
-                                 height: (maxY - minY) + 2 * pad)
-                context.stroke(Path(roundedRect: box, cornerRadius: 6),
-                               with: .color(Theme.good.opacity(0.7)),
-                               style: StrokeStyle(lineWidth: 2))
+            // PinoQuest-style leveled reference box: a square anchored on the torso,
+            // oriented by the leveled spine — LEVEL when you stand/turn, ANGLED when
+            // you bend. It draws in edge-by-edge (top edge first) on (re)acquire and
+            // vanishes on a crouch. Drawn first so the skeleton sits on top.
+            if box.valid, box.corners.count == 4 {
+                func boxPt(_ i: Int) -> CGPoint {
+                    let c = box.corners[i]
+                    return CGPoint(x: offX + CGFloat(c.x) * drawnW, y: offY + CGFloat(c.y) * drawnH)
+                }
+                var quad = Path()
+                quad.move(to: boxPt(0))      // TL
+                quad.addLine(to: boxPt(1))   // TR  (top edge drawn first)
+                quad.addLine(to: boxPt(2))   // BR
+                quad.addLine(to: boxPt(3))   // BL
+                quad.closeSubpath()
+                let shown = quad.trimmedPath(from: 0, to: CGFloat(drawProgress))
+                context.stroke(shown, with: .color(Theme.good),
+                               style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
             }
 
             // Bones first, so joint dots draw on top.
@@ -121,17 +171,22 @@ struct SkeletonOverlay: View {
                            with: .color(.black.opacity(0.35)),
                            style: StrokeStyle(lineWidth: 3.5, lineCap: .round, lineJoin: .round))
             context.stroke(bonePath,
-                           with: .color(Theme.textPrimary.opacity(0.9)),
+                           with: .color(.white.opacity(0.95)),
                            style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
 
-            // Small green joint dots at every present landmark.
-            let r: CGFloat = 3
+            // Joint dots colored by body side (PinoQuest-style): cyan = left,
+            // orange = right, white = center (nose). Face-cluster dots are smaller.
             for l in BlazePose.Landmark.allCases {
                 guard let p = project(l) else { continue }
+                let r: CGFloat = Self.isFace(l) ? 2 : 3
                 let rect = CGRect(x: p.x - r, y: p.y - r, width: 2 * r, height: 2 * r)
-                context.fill(Path(ellipseIn: rect), with: .color(Theme.good))
+                context.fill(Path(ellipseIn: rect), with: .color(Self.dotColor(l)))
             }
         }
         .allowsHitTesting(false)
+        // Edge-by-edge draw-in when the box (re)acquires; run back to 0 on vanish.
+        .onChange(of: box.valid) { _, valid in
+            withAnimation(.easeOut(duration: 0.45)) { drawProgress = valid ? 1 : 0 }
+        }
     }
 }

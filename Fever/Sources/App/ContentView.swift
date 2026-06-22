@@ -95,7 +95,7 @@ struct ContentView: View {
             CameraPreview(session: pipeline.previewSession,
                           authorized: pipeline.cameraAuthorized)
                 .overlay {
-                    SkeletonOverlay(points: pipeline.previewPoints)
+                    SkeletonOverlay(points: pipeline.previewPoints, box: pipeline.leveledBox)
                 }
 
             // CONTROLS: floating chrome, sized to the window. Using a
@@ -167,6 +167,9 @@ private struct ControlBar: View {
                 .padding(.horizontal, 6)
             }
         }
+        // Apply leveling/Body-Stabilizer changes to the running backend immediately.
+        .onChange(of: config.bodyStabilizer) { pipeline.applyLevelingConfig() }
+        .onChange(of: config.levelIncludeRoll) { pipeline.applyLevelingConfig() }
     }
 
     @ViewBuilder private var buttons: some View {
@@ -190,6 +193,19 @@ private struct ControlBar: View {
         .buttonStyle(.glass)
         .tint(Theme.dustyRose)
         .disabled(!pipeline.isRunning)
+
+        // Body Stabilizer — PinoQuest-style continuous gravity re-leveling. Tints
+        // green when active. Baseline leveling (datum from Recenter) is always on;
+        // this adds continuous re-leveling that tracks slow camera/posture drift.
+        Button {
+            config.bodyStabilizer.toggle()
+        } label: {
+            Label("Body Stabilizer", systemImage: "gyroscope")
+                .font(.system(size: 13, weight: .medium))
+        }
+        .buttonStyle(.glass)
+        .tint(config.bodyStabilizer ? Theme.good : Theme.textMuted)
+        .help("Body Stabilizer — continuously re-levels tracking so it stays correct regardless of camera angle.")
     }
 
     // Compact live readout on a single backing capsule so the small monospaced

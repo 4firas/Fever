@@ -12,10 +12,17 @@ public protocol PoseLandmarker {
     /// Clear any per-run temporal state (smoothed scale, depth-sign hysteresis).
     /// Called between tracking runs. Default no-op for stateless backends.
     func reset()
+
+    /// Update gravity-leveling ("Body Stabilizer") parameters. Thread-safe; called
+    /// from the UI/config path while the worker may be mid-detect. `enabled` turns on
+    /// continuous re-leveling; `includeRoll` adds camera-roll correction. Default
+    /// no-op for backends without leveling (e.g. the stub).
+    func setLeveling(enabled: Bool, includeRoll: Bool)
 }
 
 public extension PoseLandmarker {
     func reset() {}
+    func setLeveling(enabled: Bool, includeRoll: Bool) {}
 }
 
 /// Confidence thresholds matching the PinoFBT defaults.

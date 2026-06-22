@@ -31,8 +31,13 @@ public enum MediaPipeFrame {
     public static let defaultZSign: Float = 1
 
     /// - Parameter zSign: sign applied to world Z (the backend passes its configured value).
+    /// - Parameter level: gravity-leveling rotation (from `BodyStabilizer`/`LevelEstimator`)
+    ///   applied to every landmark right after the axis-fix and BEFORE the origin/floor
+    ///   latch, so floor-anchoring and the foot solver's `worldUp` are measured along true
+    ///   gravity even under a tilted camera. Identity by default — no behavior change.
     public static func toSolverFrame(_ reply: SidecarReply, latch: FloorOriginLatch,
-                                     zSign: Float = defaultZSign) -> PoseResult? {
+                                     zSign: Float = defaultZSign,
+                                     level: simd_quatf = LevelEstimator.identity) -> PoseResult? {
         guard reply.found, reply.world.count == 33 else { return nil }
         let v = reply.visibility
         func present(_ l: BlazePose.Landmark) -> Bool { v[l.rawValue] > 0.5 }
@@ -40,12 +45,15 @@ public enum MediaPipeFrame {
         let haveHip = present(.leftHip) || present(.rightHip)
         guard haveShoulders, haveHip else { return nil }
 
-        // Axis fix: x stays, y negated (down->up), z * zSign. World is already hip-origin.
+        // Axis fix: x stays, y negated (down->up), z * zSign. World is already hip-origin,
+        // so `level` rotates the body about ~the hip into a true-vertical world frame
+        // (identity → exact passthrough). This MUST precede the origin/floor latch below.
         var lm = [NormalizedLandmark](repeating: NormalizedLandmark(position: .zero, visibility: 0, presence: 0),
                                       count: 33)
         for i in 0..<33 {
             let w = reply.world[i]
-            lm[i] = NormalizedLandmark(position: SIMD3(w.x, -w.y, w.z * zSign),
+            let p = level.act(SIMD3(w.x, -w.y, w.z * zSign))
+            lm[i] = NormalizedLandmark(position: p,
                                        visibility: v[i], presence: reply.presence[i])
         }
 

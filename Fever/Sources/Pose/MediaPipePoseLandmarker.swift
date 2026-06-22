@@ -9,6 +9,10 @@ import simd
 public final class MediaPipePoseLandmarker: PoseLandmarker {
     private let service: PoseInferenceService
     private let latch = FloorOriginLatch()
+    private let stabilizer = BodyStabilizer()
+    private var lastTime: TimeInterval?
+    private let levelLock = NSLock()
+    private var levelEnabled = false   // continuous re-leveling (Body Stabilizer toggle)
     private let targetHeight: Int
     private let zSign: Float
     private let ci = CIContext(options: [.workingColorSpace: NSNull()])
@@ -30,7 +34,13 @@ public final class MediaPipePoseLandmarker: PoseLandmarker {
         self.init(service: PoseSidecar(paths: paths))
     }
 
-    public func reset() { latch.reset(); service.reset() }
+    /// Thread-safe leveling config update (Body Stabilizer toggle + roll correction).
+    public func setLeveling(enabled: Bool, includeRoll: Bool) {
+        levelLock.withLock { levelEnabled = enabled }
+        stabilizer.setIncludeRoll(includeRoll)
+    }
+
+    public func reset() { latch.reset(); service.reset(); stabilizer.reset(); lastTime = nil }
 
     public func detect(_ pixelBuffer: CVPixelBuffer, at time: TimeInterval) async -> PoseResult? {
         let srcW = CVPixelBufferGetWidth(pixelBuffer), srcH = CVPixelBufferGetHeight(pixelBuffer)
@@ -40,7 +50,14 @@ public final class MediaPipePoseLandmarker: PoseLandmarker {
         guard let rgb = renderRGB(pixelBuffer, width: w, height: h) else { return nil }
         let t = UInt64((time * 1_000_000).rounded())
         guard let reply = await service.infer(rgb: rgb, width: w, height: h, tMicros: t) else { return nil }
-        guard let pose = MediaPipeFrame.toSolverFrame(reply, latch: latch, zSign: zSign) else { return nil }
+        // Gravity-leveling: the baseline datum (frozen on reset/Re-center) is always
+        // applied; the Body Stabilizer toggle (`levelEnabled`) additionally turns on
+        // continuous re-leveling that low-pass-tracks slow camera/posture drift.
+        let dt = lastTime.map { Float(max(0, time - $0)) } ?? 0
+        lastTime = time
+        let enabled = levelLock.withLock { levelEnabled }
+        let level = stabilizer.levelRotation(reply: reply, zSign: zSign, enabled: enabled, dt: dt)
+        guard let pose = MediaPipeFrame.toSolverFrame(reply, latch: latch, zSign: zSign, level: level) else { return nil }
         // Stamp the caller's timestamp (toSolverFrame leaves it 0).
         return PoseResult(landmarks: pose.landmarks, timestamp: time, imagePoints: pose.imagePoints)
     }

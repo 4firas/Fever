@@ -65,6 +65,11 @@ public final class TrackingPipeline {
     /// its One-Euro + SLERP smoothing untouched.
     public private(set) var previewPoints: [SIMD2<Float>] = []
 
+    /// PinoQuest-style leveled reference box for the overlay (screen-normalized
+    /// corners + a validity flag for the vanish-on-crouch behavior). Published at
+    /// full rate alongside `previewPoints`.
+    public private(set) var leveledBox: LeveledBox = .invalid
+
     /// Running total of dropped frames, mirrored from the source on each tick.
     public private(set) var droppedFrames: Int = 0
 
@@ -162,6 +167,8 @@ public final class TrackingPipeline {
         // Clear the pose backend's per-run temporal state (smoothed scale +
         // depth-sign hysteresis) so a new run starts from a clean estimate.
         landmarker.reset()
+        // Sync gravity-leveling (Body Stabilizer) config to the backend for this run.
+        landmarker.setLeveling(enabled: config.bodyStabilizer, includeRoll: config.levelIncludeRoll)
 
         // Fresh OSC connection from the live host/port.
         let sender = OSCSender(host: config.oscHost, port: config.oscPort)
@@ -258,8 +265,13 @@ public final class TrackingPipeline {
                 //     This drives the instant, VISO-like preview skeleton from the
                 //     raw detection; the smoothed tracker path is untouched.
                 let previewPoints = raw.imagePoints
+                // Leveled reference box, built from the same leveled landmarks +
+                // image points that drive the preview (pure, off the main actor).
+                let leveledBox = LeveledBoxBuilder.build(landmarks: raw.landmarks,
+                                                         imagePoints: raw.imagePoints)
                 await MainActor.run {
                     telemetrySink.publishPreviewPoints(previewPoints)
+                    telemetrySink.publishLeveledBox(leveledBox)
                 }
 
                 // 2..6. One-Euro → solve → fuse → SLERP → map → assemble.
@@ -333,6 +345,7 @@ public final class TrackingPipeline {
         processor.reset()
         fps = 0
         previewPoints = []
+        leveledBox = .invalid
     }
 
     /// Recenter: re-baseline the body from the user's CURRENT standing pose.
@@ -347,6 +360,13 @@ public final class TrackingPipeline {
     /// Instead, Recenter re-latches the landmarker's scale + floor reference from
     /// the current frame, so the user can stand up straight, hit Recenter, and
     /// re-seed a clean baseline. The worker performs the reset on its own queue.
+    /// Apply Body Stabilizer / leveling config to the running backend. Called live
+    /// from the UI when the toggle or the roll setting changes; safe at any time
+    /// (thread-safe inside the backend) and a no-op for backends without leveling.
+    public func applyLevelingConfig() {
+        landmarker.setLeveling(enabled: config.bodyStabilizer, includeRoll: config.levelIncludeRoll)
+    }
+
     public func calibrate() {
         runtime.requestRebaseline()
     }
@@ -373,6 +393,12 @@ public final class TrackingPipeline {
     private func publishPreviewPoints(_ points: [SIMD2<Float>]) {
         guard isRunning else { return }
         previewPoints = points
+    }
+
+    /// Full-rate publish of the leveled reference box (paired with the preview).
+    private func publishLeveledBox(_ box: LeveledBox) {
+        guard isRunning else { return }
+        leveledBox = box
     }
 
     /// Throttled publish of the latest telemetry snapshot (≈12 Hz max).
