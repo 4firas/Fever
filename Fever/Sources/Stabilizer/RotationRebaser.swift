@@ -79,7 +79,18 @@ public final class RotationRebaser {
     /// rest-relative, hemisphere-locked, SLERP-smoothed delta to put on the wire.
     /// `captureNow` (true on the Recenter frame) latches the rest pose first.
     public func rebase(_ joint: JointType, live: simd_quatf, captureNow: Bool) -> simd_quatf {
-        if captureNow { qRest[joint] = live }
+        if captureNow {
+            qRest[joint] = live
+            // Drop the smoothing history so the capture frame emits a CLEAN
+            // identity delta. Otherwise a stale qPrev (from before this Recenter)
+            // would SLERP the rest pose toward the previous pose's delta, leaking
+            // a transient non-zero rotation onto every body tracker for several
+            // frames after every in-session Recenter (the avatar visibly settles
+            // instead of snapping to the calibrated rest). With qPrev cleared the
+            // `if let prev` branch below is skipped on the capture frame and the
+            // emitted delta is exactly inverse(live)·live = identity.
+            qPrev[joint] = nil
+        }
 
         // qDelta = inverse(qRest) * qLive. No rest yet → identity rest (absolute).
         let rest = qRest[joint] ?? simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)

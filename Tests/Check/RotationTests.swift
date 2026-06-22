@@ -158,6 +158,88 @@ enum RotationTests {
         testFootArticulates(t)
         testNoSingularity(t)
         testRestRelative(t)
+        testRecenterClearsSmoothingHistory(t)
+        testRebaserContract(t)
+    }
+
+    // MARK: - 5. RECENTER CLEARS SMOOTHING HISTORY
+
+    /// The defect this pins: across an in-session Recenter, `rebase` kept the
+    /// stale per-joint `qPrev` from before the recenter, so the very capture frame
+    /// SLERP-blended the (correct) identity rest delta toward the previous pose's
+    /// delta — emitting a transient non-zero rotation on every body tracker for
+    /// several frames after EVERY recenter. The contract of Recenter is that the
+    /// rest pose maps to a zero delta IMMEDIATELY. Clearing `qPrev` on the capture
+    /// frame makes the emitted delta exactly identity.
+    static func testRecenterClearsSmoothingHistory(_ t: TestRunner) {
+        let identity = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+
+        // A live orientation well away from identity AND from any prior delta, so a
+        // stale qPrev would visibly drag the capture-frame delta off identity.
+        let live = simd_normalize(simd_quatf(angle: 1.1, axis: simd_normalize(SIMD3<Float>(0.3, 0.8, 0.5))))
+
+        // Heavy smoothing (0.9) → with a stale qPrev the SLERP would hold MOST of
+        // the previous delta, so the bug is maximally visible; with the fix the
+        // capture frame must still emit a clean identity regardless of smoothing.
+        let rebaser = RotationRebaser(smoothingFactor: 0.9)
+
+        // Frame 1: a normal (non-capture) frame at a DIFFERENT orientation populates
+        // qPrev with a non-identity delta (rest is still identity here, so the delta
+        // equals this prior live).
+        let prior = simd_normalize(simd_quatf(angle: 0.9, axis: simd_normalize(SIMD3<Float>(1, 0, 0))))
+        _ = rebaser.rebase(.chest, live: prior, captureNow: false)
+
+        // Frame 2: the Recenter capture frame on the NEW live pose. The emitted
+        // delta must be (near) identity — inverse(live)·live with NO contamination
+        // from the stale qPrev.
+        let delta = rebaser.rebase(.chest, live: live, captureNow: true)
+
+        t.test("RECENTER: capture frame emits a clean identity delta (qPrev cleared)") {
+            t.check(delta.vector.x.isFinite && delta.vector.y.isFinite
+                    && delta.vector.z.isFinite && delta.vector.w.isFinite,
+                    "capture-frame delta non-finite: \(delta.vector)")
+            // dot with identity ~ ±1 ⇒ the quaternion IS (near) identity.
+            let d = abs(simd_dot(simd_normalize(delta).vector, identity.vector))
+            t.check(d > 0.9999,
+                    "capture-frame delta must be identity right after Recenter (dot=\(d), q=\(delta.vector))")
+            print(String(format: "  [recenter] capture delta dot(identity)=%.6f", d))
+        }
+
+        // And the NEXT held frame at the same pose stays at identity (the cleared
+        // qPrev now holds identity, so smoothing toward identity stays identity).
+        let held = rebaser.rebase(.chest, live: live, captureNow: false)
+        t.test("RECENTER: holding the rest pose after capture stays at identity") {
+            let d = abs(simd_dot(simd_normalize(held).vector, identity.vector))
+            t.check(d > 0.9999, "post-capture hold must remain identity (dot=\(d))")
+        }
+    }
+
+    // MARK: - 6. REBASER CONTRACT (surrounding behaviour)
+
+    /// Guards the small invariants the rebaser is built on, so a future refactor
+    /// can't silently break them: (a) before any capture it falls back to an
+    /// IDENTITY rest (delta == live, i.e. absolute pass-through), and (b)
+    /// `consumeCapturePending` is a strict ONE-SHOT latch.
+    static func testRebaserContract(_ t: TestRunner) {
+        // (a) Identity-rest fallback: no capture yet → the very first emitted delta
+        // equals the live orientation (qDelta = inverse(identity)·live = live).
+        let rebaser = RotationRebaser(smoothingFactor: 0.5)
+        let live = simd_normalize(simd_quatf(angle: 0.7, axis: simd_normalize(SIMD3<Float>(0.2, 1, 0.4))))
+        let first = rebaser.rebase(.hip, live: live, captureNow: false)
+        t.test("CONTRACT: identity-rest fallback before capture (delta == live)") {
+            let d = abs(simd_dot(simd_normalize(first).vector, live.vector))
+            t.check(d > 0.9999, "pre-capture delta must equal live (absolute pass-through): dot=\(d)")
+        }
+
+        // (b) One-shot capture latch: requestRestCapture then consume returns true
+        // exactly once; the immediate re-consume returns false.
+        let latch = RotationRebaser(smoothingFactor: 0.5)
+        t.test("CONTRACT: consumeCapturePending is a strict one-shot latch") {
+            t.check(latch.consumeCapturePending() == false, "no capture requested → false")
+            latch.requestRestCapture()
+            t.check(latch.consumeCapturePending() == true, "after request → true once")
+            t.check(latch.consumeCapturePending() == false, "second consume → false (one-shot)")
+        }
     }
 
     // MARK: - 1. BOUNDED + zero-centered at rest
