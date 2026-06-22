@@ -220,3 +220,60 @@ NaN/zero-length guards have no direct tests.
 Dry streak: 0/2. Continuing.
 
 ---
+
+## Iteration 4 — 2026-06-22
+
+**3 chosen, 3 survived (0/3 refuted each), 0 rejected.** The hardened skeptic
+prompt worked: the main checkout stayed pristine this round (no pollution to clean
+up). Integration verified on-branch: build green; `swift run FeverCheck` =
+**116 tests / 970 assertions / 0 failed**.
+
+### `10e536d` Clear smoothing history on Recenter so the rest pose maps to zero immediately
+- **What:** `RotationRebaser.rebase` now drops the per-joint `qPrev` on the
+  capture (Recenter) frame, so the emitted delta is exactly `inverse(live)·live`
+  = identity instead of a SLERP blend toward the previous pose's delta.
+- **Why:** Recenter's contract is that the rest pose maps to zero rotation
+  immediately. Stale `qPrev` leaked a transient non-zero rotation onto every body
+  tracker for several frames after each in-session recenter — the avatar visibly
+  "settled" instead of snapping to the calibrated rest.
+- **Evidence:** build green; 116/970; new tests pin the clean capture delta
+  (dot(identity) > 0.9999), the post-capture hold, the identity-rest fallback, and
+  the one-shot capture latch; existing REST-RELATIVE tests still pass. 3/3 skeptics
+  could not refute. (Deferred in iteration 2 as "untested"; now ships with the
+  tests that make it verifiable.)
+
+### `f70f756` Swap heels and foot-indices with their leg in landmark anti-swap
+- **What:** Add `(leftHeel,rightHeel)` and `(leftFootIndex,rightFootIndex)` to
+  `LandmarkConsistency.pairs` so an L/R leg transpose moves ankle+knee+heel+toe as
+  one rigid foot.
+- **Why:** Previously heels/toes were never swapped, so in the profile-occlusion
+  transpose this class targets, a corrected ankle/knee was paired with the *other*
+  foot's heel→toe vector — and `solveFoot` derives foot yaw/pitch from `toe−heel`,
+  pointing the foot the wrong way (half-completing the prior committed fix).
+- **Evidence:** build green; 116/970; new test transposes the whole foot and
+  asserts the corrected ankle/heel/toe all land on the same side. 3/3 skeptics
+  could not refute. (Carried-over critic seed from iteration 3.)
+
+### `6e64a50` Fix CLI help: app uses MediaPipe sidecar, not Apple Vision
+- **What:** Correct four user-facing/internal `FeverMain.swift` references from
+  "Apple Vision 3D pose" to "MediaPipe sidecar" (usage banner, `--help` text,
+  single-instance-guard comment, UI-scene comment).
+- **Why:** The committed help text described the removed Vision backend — actively
+  misleading to anyone reading `Fever --help`. Continues the post-pivot doc sweep.
+- **Evidence:** docs-only; build green; 116/970. 3/3 skeptics could not refute.
+
+**Critic — high-confidence work remaining (true):** (1) **No-reply IPC hang** —
+`pose_server.py`'s `bad magic` and (new) `short frame` branches `continue` with no
+reply, while `PoseSidecar.readFrame` has **no read timeout**, so a request-direction
+desync wedges the inference serial queue forever. The robust fix is Swift-side: a
+bounded read that tears down + restarts on a missing/late reply (also fixes the
+READY-handshake blocking read), which retroactively makes the short-frame/bad-magic
+continues safe. (2) `PoseSidecar` teardown still leaks the stderr FD + dispatch
+handler and never reaps the child (same file as #1 — separate iteration). (3)
+`safeSlerp`/`angleBetween` + `AngleTracker.fuseWorldRotation` have no direct tests.
+(4) `encodeRequest` double-copy (~1.2 MB/frame) hot-path win.
+
+Dry streak: 0/2. Continuing — next: the Swift-side read-timeout robustness fix
+(highest value; headless-verifiable with a non-responding stub child).
+
+---
