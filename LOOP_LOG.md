@@ -277,3 +277,46 @@ Dry streak: 0/2. Continuing — next: the Swift-side read-timeout robustness fix
 (highest value; headless-verifiable with a non-responding stub child).
 
 ---
+
+## Wind-down — 2026-06-22 (stopped at user request, not loop-until-dry)
+
+Iteration 5 (Swift read-timeout / FD-leak / math-guard tests) was **launched then
+cleanly stopped mid-run** at the user's request — no code from it landed, no
+worktrees left behind. The loop ends here by choice, not because the pool went dry
+(the critic still lists real high-confidence work, below).
+
+**Result: 4 completed iterations · 12 substantive commits · 0 reverts.** Every code
+commit built green and survived a ≥3-skeptic adversarial panel (majority could not
+refute); the tree is green at every step.
+
+Final verified state on `loop/auto-improve`:
+- `swift build` → clean · `swift run FeverCheck` → **116 tests / 970 assertions / 0 failed**
+  (up from the 102/933 baseline — +14 tests / +37 assertions).
+- Real MediaPipe sidecar smoke + short-frame survival probes pass.
+
+What landed, by theme:
+- **Sidecar IPC robustness:** bound the reply length (`9dbaf93`), keep the child
+  alive on per-frame inference errors (`2bfd041`), guard the header parse against
+  short request frames (`b1edcd2`).
+- **Solver correctness:** floor-anchor no longer teleports low-presence joints
+  (`bfd55bc`); Recenter maps the rest pose to identity immediately (`10e536d`);
+  the L/R anti-swap moves the whole foot, not just ankle+knee (`f70f756`).
+- **Test coverage:** decodeReply truncation (`13d269d`), oscPort/coefficient
+  clamps (`744e48a`), the `frameFromTwoAxes` singularity guard (`4ac3461`) — plus
+  regression tests shipped with each correctness fix.
+- **Clarity/dead code:** removed a no-op ternary (`8025d7f`); corrected the
+  solver-frame docs and CLI help from the removed Apple-Vision path to MediaPipe
+  (`8273827`, `6e64a50`).
+
+**Highest-value work still open** (verified real by the iteration-4 critic; good
+starting points for a future run):
+1. **`PoseSidecar` read timeout** — `readFrame` blocks with no timeout, so a
+   request-direction desync (a no-reply `continue` in `pose_server.py`) can wedge
+   the inference serial queue forever. A Swift-side bounded read that tears down +
+   restarts is the unifying fix (also covers the READY-handshake blocking read);
+   headless-verifiable with a non-responding stub child.
+2. **`PoseSidecar` teardown leak** — leaks the stderr FD + dispatch handler and
+   never reaps the child on restart (same file as #1 → separate change).
+3. **`safeSlerp` / `angleBetween` NaN-guard tests** — cheap, asset-free.
+4. **`encodeRequest` double-copy** (~1.2 MB/frame) — perf win, needs byte-equivalence proof.
+5. Finish the post-pivot "Vision" doc sweep in the remaining UI/camera files.
