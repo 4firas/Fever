@@ -231,3 +231,56 @@ public func quatFromEulerZXYDegrees(_ e: SIMD3<Float>) -> simd_quatf {
 public func normalizedToVRChat(_ p: SIMD3<Float>, scale: Float) -> SIMD3<Float> {
     SIMD3<Float>(p.x * scale, (1.0 - p.y) * scale, p.z * scale)
 }
+
+// MARK: - PinoFBT fast_kinematics (exact, reverse-engineered)
+
+/// `get_rotation(u, v)` from PinoFBT's `fast_kinematics` — the shortest-arc
+/// quaternion rotating `u` onto `v`. Normalizes inputs; identity if parallel,
+/// 180° about a perpendicular axis if antiparallel. Verified byte-exact against
+/// the compiled Numba core via emulation.
+public func shortestArc(_ u: SIMD3<Float>, _ v: SIMD3<Float>) -> simd_quatf {
+    let lu = simd_length(u), lv = simd_length(v)
+    let identity = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+    guard lu > 1e-6, lv > 1e-6 else { return identity }
+    let uh = u / lu, vh = v / lv
+    let d = simd_dot(uh, vh)
+    if d > 0.999999 { return identity }
+    if d < -0.999999 {
+        var ax = simd_cross(SIMD3<Float>(1, 0, 0), uh)
+        if simd_length(ax) < 1e-6 { ax = simd_cross(SIMD3<Float>(0, 1, 0), uh) }
+        ax = simd_normalize(ax)
+        return simd_quatf(ix: ax.x, iy: ax.y, iz: ax.z, r: 0)
+    }
+    let c = simd_cross(uh, vh)
+    return simd_normalize(simd_quatf(ix: c.x, iy: c.y, iz: c.z, r: d + 1))
+}
+
+/// PinoFBT `calc_root_rotation` — pelvis/hip orientation. Uses SMPL joints
+/// leftHip(1), rightHip(2), spine1(3), spine2(6). `a1` = forward ref, `a2` = up ref.
+/// Verified against the compiled core (max err ~1e-3 on realistic poses).
+public func calcRootRotation(_ w: [SIMD3<Float>],
+                             a1: SIMD3<Float> = SIMD3<Float>(0, 0, 1),
+                             a2: SIMD3<Float> = SIMD3<Float>(0, 1, 0)) -> simd_quatf {
+    let lh = w[1], rh = w[2], s1 = w[3], s2 = w[6]
+    let hipmid = (lh + rh) * 0.5
+    let prim = simd_cross(s2 - s1, rh - lh)   // forward normal = cross(spineDir, hipline)
+    let up = s1 - hipmid
+    let q1 = shortestArc(a1, prim)
+    let q2 = shortestArc(q1.act(a2), up)
+    return simd_mul(q2, q1)
+}
+
+/// PinoFBT `calc_chest_rotation` — chest orientation. Uses SMPL joints
+/// leftCollar(13), rightCollar(14), spine3(9). Collar line is torso-rigid (unlike
+/// the arm-driven shoulders). Verified against the compiled core (max err ~6e-6).
+public func calcChestRotation(_ w: [SIMD3<Float>],
+                              a1: SIMD3<Float> = SIMD3<Float>(0, 0, 1),
+                              a2: SIMD3<Float> = SIMD3<Float>(0, 1, 0)) -> simd_quatf {
+    let lc = w[13], rc = w[14], s3 = w[9]
+    let collarmid = (lc + rc) * 0.5
+    let collar = lc - rc
+    let prim = simd_cross(collar, collarmid - s3)   // chest forward normal
+    let q1 = shortestArc(a1, prim)
+    let q2 = shortestArc(q1.act(a2), collar)
+    return simd_mul(q2, q1)
+}

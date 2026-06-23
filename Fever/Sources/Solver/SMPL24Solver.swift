@@ -53,33 +53,24 @@ public final class SMPL24Solver {
         var raws: [Int: simd_quatf] = [:]
         for slot in TrackerMapA.slots {
             positions[slot.index] = world[slot.joint.rawValue]
-            guard let b = Self.bones[slot.index] else { continue }
-            let primary = j(b.pB) - j(b.pA)
-            let secondary = j(b.sB) - j(b.sA)
-            let q = frameFromTwoAxes(primary: primary, secondary: secondary,
+            let q: simd_quatf
+            switch slot.index {
+            case 1:  q = calcRootRotation(world)    // hip — exact PinoFBT calc_root
+            case 4:  q = calcChestRotation(world)   // chest — exact PinoFBT calc_chest
+            default:
+                guard let b = Self.bones[slot.index] else { continue }
+                q = frameFromTwoAxes(primary: j(b.pB) - j(b.pA),
+                                     secondary: j(b.sB) - j(b.sA),
                                      holdLast: holds[slot.index] ?? identity)
+            }
             if tracked { holds[slot.index] = q }
             raws[slot.index] = q
         }
 
         // Latch rest on the first tracked frame after a request, then emit each
         // tracker's rotation RELATIVE to rest (identity at rest, clean deltas under
-        // motion) — kills the rest offsets and the baseline overshoot.
-        // Coherent spine: solve the chest as the hip TIMES a weighted, clamped
-        // relative bend — not an independent world-frame that fights the hip.
-        // Monocular tracking gives reliable yaw (twist), semi-reliable pitch (lean),
-        // and unreliable roll (depth), so weight each bend axis by its trust and
-        // clamp to anatomical limits. Done on world quats BEFORE rest capture so the
-        // latched rest is consistent.
-        if let qh = raws[1], let qc = raws[4] {
-            let bend = simd_normalize(qh.inverse * qc)         // chest relative to hip
-            var be = quaternionToEulerZXYDegrees(bend)         // (pitch, yaw, roll)°
-            be.x = simd_clamp(be.x * 0.6, -35, 35)             // lean: semi-reliable
-            be.y = simd_clamp(be.y * 1.0, -45, 45)             // twist: reliable (wanted)
-            be.z = simd_clamp(be.z * 0.3, -15, 15)             // sidebend: unreliable
-            raws[4] = simd_normalize(qh * quatFromEulerZXYDegrees(be))
-        }
-
+        // motion) — removes each part's fixed rest offset (VRChat would calibrate it
+        // away anyway, but rest-relative keeps the in-app recenter flow clean).
         if captureRest && tracked { restQuats = raws; captureRest = false }
         var eulers: [Int: SIMD3<Float>] = [:]
         for (slot, qraw) in raws {
