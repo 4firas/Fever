@@ -72,6 +72,20 @@ public final class SMPL24Solver {
             eulers[slot] = quaternionToEulerZXYDegrees(qOut)
         }
 
+        // Hip tracker sits at the SMPL root (≈ groin); raise it toward the lower
+        // spine so VRChat places the hip bone at the waist (user: "too low, between
+        // the thighs").
+        positions[1] = j(.pelvis) + (j(.spine1) - j(.pelvis)) * 0.5
+
+        // Chest stabilization: monocular chest pitch/roll over-rotate (hunch when
+        // seated) and pick up spurious twist. Couple them to the stabler hip with a
+        // damped, clamped relative flex; keep chest YAW free (the wanted turn signal).
+        if let c = eulers[4], let h = eulers[1] {
+            let pitch = h.x + simd_clamp((c.x - h.x) * 0.5, -15, 15)
+            let roll  = h.z + simd_clamp((c.z - h.z) * 0.5, -12, 12)
+            eulers[4] = SIMD3<Float>(pitch, c.y, roll)
+        }
+
         let head: SIMD3<Float>
         switch headAnchor {
         case .head15:           head = j(.head)
