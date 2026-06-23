@@ -64,6 +64,7 @@ struct FeverCheck {
         await RotationWireStub.run(t: t)
         SidecarProtocolTests.run(t)
         MathTests.run(t)
+        SpineKinematicsTests.run(t)
         LevelEstimatorTests.run(t)
         BodyStabilizerTests.run(t)
         LeveledBoxTests.run(t)
