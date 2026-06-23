@@ -211,6 +211,18 @@ public func quaternionToEulerZXYDegrees(_ q: simd_quatf) -> SIMD3<Float> {
     return SIMD3<Float>(x * radToDeg, y * radToDeg, z * radToDeg)
 }
 
+/// Build a quaternion from ZXY euler angles in DEGREES — the exact inverse of
+/// `quaternionToEulerZXYDegrees` (Unity/VRChat convention R = Ry·Rx·Rz, where the
+/// vector components are (pitch X, yaw Y, roll Z)). Used to recompose a rotation
+/// after per-axis weighting/clamping (e.g. the spine bend).
+public func quatFromEulerZXYDegrees(_ e: SIMD3<Float>) -> simd_quatf {
+    let d = Float.pi / 180
+    let qx = simd_quatf(angle: e.x * d, axis: SIMD3<Float>(1, 0, 0))
+    let qy = simd_quatf(angle: e.y * d, axis: SIMD3<Float>(0, 1, 0))
+    let qz = simd_quatf(angle: e.z * d, axis: SIMD3<Float>(0, 0, 1))
+    return qy * qx * qz
+}
+
 /// Convert normalized BlazePose coords (x∈[0,1] y↓, z toward camera) to
 /// VRChat world space (meters, y↑, z forward). RETAINED for the JointSolver's
 /// internal frame; the authoritative VRChat-space conversion now lives in

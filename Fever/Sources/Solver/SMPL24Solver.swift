@@ -65,6 +65,21 @@ public final class SMPL24Solver {
         // Latch rest on the first tracked frame after a request, then emit each
         // tracker's rotation RELATIVE to rest (identity at rest, clean deltas under
         // motion) — kills the rest offsets and the baseline overshoot.
+        // Coherent spine: solve the chest as the hip TIMES a weighted, clamped
+        // relative bend — not an independent world-frame that fights the hip.
+        // Monocular tracking gives reliable yaw (twist), semi-reliable pitch (lean),
+        // and unreliable roll (depth), so weight each bend axis by its trust and
+        // clamp to anatomical limits. Done on world quats BEFORE rest capture so the
+        // latched rest is consistent.
+        if let qh = raws[1], let qc = raws[4] {
+            let bend = simd_normalize(qh.inverse * qc)         // chest relative to hip
+            var be = quaternionToEulerZXYDegrees(bend)         // (pitch, yaw, roll)°
+            be.x = simd_clamp(be.x * 0.6, -35, 35)             // lean: semi-reliable
+            be.y = simd_clamp(be.y * 1.0, -45, 45)             // twist: reliable (wanted)
+            be.z = simd_clamp(be.z * 0.3, -15, 15)             // sidebend: unreliable
+            raws[4] = simd_normalize(qh * quatFromEulerZXYDegrees(be))
+        }
+
         if captureRest && tracked { restQuats = raws; captureRest = false }
         var eulers: [Int: SIMD3<Float>] = [:]
         for (slot, qraw) in raws {
@@ -73,18 +88,8 @@ public final class SMPL24Solver {
         }
 
         // Hip tracker sits at the SMPL root (≈ groin); raise it toward the lower
-        // spine so VRChat places the hip bone at the waist (user: "too low, between
-        // the thighs").
+        // spine so VRChat places the hip bone at the waist (user: "too low").
         positions[1] = j(.pelvis) + (j(.spine1) - j(.pelvis)) * 0.5
-
-        // Chest stabilization: monocular chest pitch/roll over-rotate (hunch when
-        // seated) and pick up spurious twist. Couple them to the stabler hip with a
-        // damped, clamped relative flex; keep chest YAW free (the wanted turn signal).
-        if let c = eulers[4], let h = eulers[1] {
-            let pitch = h.x + simd_clamp((c.x - h.x) * 0.5, -15, 15)
-            let roll  = h.z + simd_clamp((c.z - h.z) * 0.5, -12, 12)
-            eulers[4] = SIMD3<Float>(pitch, c.y, roll)
-        }
 
         let head: SIMD3<Float>
         switch headAnchor {
