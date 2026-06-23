@@ -25,7 +25,7 @@ public final class SMPL24Solver {
     private struct Bone { let pA, pB, sA, sB: SMPLJoint }
     private static let bones: [Int: Bone] = [
         1: Bone(pA: .pelvis,     pB: .spine1,    sA: .leftHip,      sB: .rightHip),       // hip (root)
-        4: Bone(pA: .spine1,     pB: .spine3,    sA: .leftShoulder, sB: .rightShoulder),  // chest
+        4: Bone(pA: .spine1,     pB: .neck,      sA: .leftShoulder, sB: .rightShoulder),  // chest (long, stable axis)
         5: Bone(pA: .leftKnee,   pB: .leftAnkle, sA: .leftHip,      sB: .rightHip),       // L knee (shin)
         6: Bone(pA: .rightKnee,  pB: .rightAnkle,sA: .leftHip,      sB: .rightHip),       // R knee
         2: Bone(pA: .leftAnkle,  pB: .leftFoot,  sA: .leftKnee,     sB: .leftAnkle),      // L foot (ankle→toe)
