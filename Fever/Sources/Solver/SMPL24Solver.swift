@@ -35,18 +35,22 @@ public final class SMPL24Solver {
     ]
 
     private var holds: [Int: simd_quatf] = [:]
+    private var restQuats: [Int: simd_quatf] = [:]   // per-slot rest orientation (rest-relative base)
+    private var captureRest = true                    // latch the next tracked frame as rest
     private var headAnchor: HeadAnchorSource
 
     public init(headAnchor: HeadAnchorSource = .head15) { self.headAnchor = headAnchor }
     public func setHeadAnchor(_ a: HeadAnchorSource) { headAnchor = a }
-    public func reset() { holds.removeAll() }
+    /// Re-latch the rest pose on the next tracked frame (Recenter / Start).
+    public func requestRestCapture() { captureRest = true }
+    public func reset() { holds.removeAll() }   // keep restQuats across momentary drops
 
     public func solve(world: [SIMD3<Float>], tracked: Bool) -> SolvedFrame {
         func j(_ joint: SMPLJoint) -> SIMD3<Float> { world[joint.rawValue] }
         let identity = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
 
         var positions: [Int: SIMD3<Float>] = [:]
-        var eulers: [Int: SIMD3<Float>] = [:]
+        var raws: [Int: simd_quatf] = [:]
         for slot in TrackerMapA.slots {
             positions[slot.index] = world[slot.joint.rawValue]
             guard let b = Self.bones[slot.index] else { continue }
@@ -55,7 +59,17 @@ public final class SMPL24Solver {
             let q = frameFromTwoAxes(primary: primary, secondary: secondary,
                                      holdLast: holds[slot.index] ?? identity)
             if tracked { holds[slot.index] = q }
-            eulers[slot.index] = quaternionToEulerZXYDegrees(q)
+            raws[slot.index] = q
+        }
+
+        // Latch rest on the first tracked frame after a request, then emit each
+        // tracker's rotation RELATIVE to rest (identity at rest, clean deltas under
+        // motion) — kills the rest offsets and the baseline overshoot.
+        if captureRest && tracked { restQuats = raws; captureRest = false }
+        var eulers: [Int: SIMD3<Float>] = [:]
+        for (slot, qraw) in raws {
+            let qOut = restQuats[slot].map { qraw * $0.inverse } ?? qraw
+            eulers[slot] = quaternionToEulerZXYDegrees(qOut)
         }
 
         let head: SIMD3<Float>
