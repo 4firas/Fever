@@ -280,12 +280,33 @@ private final class FrameProcessor: @unchecked Sendable {
         solver = SMPL24Solver(headAnchor: .head15)
     }
 
+    // Debug tap: while playing to VRChat (which owns :9000), append the real solved
+    // values to ~/fever_osc.log at ~3 Hz so they can be read live without a port.
+    private static let debugPath = (NSHomeDirectory() as NSString).appendingPathComponent("fever_osc.log")
+    private var lastDebugWrite: TimeInterval = 0
+
     func rebuild(from config: TrackingConfig) {
         lock.withLock {
             transform = CameraToWorldTransform(mirrorX: config.mirrorTracking, heightScale: 1)
             smoother = TwoEuroJointSmoother()
             solver.reset()
             frameCount = 0; windowStart = 0; measuredFPS = 0
+        }
+        try? "fever osc debug log\n".write(toFile: Self.debugPath, atomically: false, encoding: .utf8)
+        lastDebugWrite = 0
+    }
+
+    private func debugTap(_ solved: SolvedFrame, ht: Float, t: TimeInterval) {
+        guard t - lastDebugWrite >= 0.33 else { return }
+        lastDebugWrite = t
+        func f(_ v: SIMD3<Float>) -> String { String(format: "(%.2f,%.2f,%.2f)", v.x, v.y, v.z) }
+        let hip = solved.slotPositions[1] ?? .zero
+        let lfoot = solved.slotPositions[2] ?? .zero
+        let chest = solved.slotPositions[4] ?? .zero
+        let line = String(format: "ht=%.2f head=%@ hip=%@ hipEulerZXY=%@ Lfoot=%@ chest=%@\n",
+                          ht, f(solved.headPosition), f(hip), f(solved.hipEulerZXY), f(lfoot), f(chest))
+        if let h = FileHandle(forWritingAtPath: Self.debugPath) {
+            h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close()
         }
     }
 
@@ -307,6 +328,7 @@ private final class FrameProcessor: @unchecked Sendable {
             body.append(OSCTracker(slot: slot.path, position: pos, eulerDegrees: euler))
         }
         let head = OSCTracker(slot: "head", position: solved.headPosition, eulerDegrees: .zero)
+        debugTap(solved, ht: pose.hasTracked, t: pose.timestamp)
 
         // FPS over a 1 s sliding window (real inference rate).
         let now = pose.timestamp

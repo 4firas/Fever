@@ -224,7 +224,10 @@ public final class TrackingConfig {
         // PinoFBT's binary signs" was wrong — it ignored the Tasks-API vs legacy-graph
         // sign difference. (The real "L/R mangle" was broken chest/foot ROTATION, not
         // position chirality — see rotationRestRelative / OSCSender.rotationSlots.)
-        mirrorTracking = d.object(forKey: Keys.mirrorTracking) as? Bool ?? false
+        // Force-true (override stale pref): the webcam shows the user mirrored, so the
+        // model's anatomical-left lands at +X (image-right) and would map to VRChat's
+        // right. A global X flip (mirrorX) restores correct L/R for legs, arms, hands.
+        mirrorTracking = true
         footTrackersAtAnkle = d.object(forKey: Keys.footTrackersAtAnkle) as? Bool ?? true
         // DEFAULT true — the rotation path is now REBUILT (two in-body axes, no
         // world-up gauge/singularity; locked-roll feet; rest-relative delta from
