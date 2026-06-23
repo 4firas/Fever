@@ -23,7 +23,7 @@ final class HeadlessRunner {
 
     private let config: TrackingConfig
     private let source: FrameSource
-    private let landmarker: PoseLandmarker
+    private let landmarker: any NLFPoseSource
     private let autoCalibrateAfter: TimeInterval?
 
     /// Telemetry sample period (seconds).
@@ -39,7 +39,7 @@ final class HeadlessRunner {
     ///   defect). nil (live tracking) leaves calibration to the user's Recenter.
     init(config: TrackingConfig,
          source: FrameSource,
-         landmarker: PoseLandmarker,
+         landmarker: any NLFPoseSource,
          autoCalibrateAfter: TimeInterval? = nil) {
         self.config = config
         self.source = source
@@ -104,7 +104,7 @@ private final class Driver {
 
     init(config: TrackingConfig,
          source: FrameSource,
-         landmarker: PoseLandmarker,
+         landmarker: any NLFPoseSource,
          telemetryInterval: TimeInterval,
          autoCalibrateAfter: TimeInterval?) {
         self.telemetryInterval = telemetryInterval

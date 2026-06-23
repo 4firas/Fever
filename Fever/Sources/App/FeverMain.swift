@@ -79,7 +79,7 @@ enum FeverMain {
         // otherwise live camera + MediaPipe body pose (sidecar). The sidecar
         // backend falls back to the stub if it isn't installed so the app runs.
         let source: FrameSource = useStub ? StubFrameSource() : CameraCapture()
-        let landmarker: PoseLandmarker = useStub ? StubPoseLandmarker() : makeLivePoseLandmarker()
+        let landmarker: any NLFPoseSource = useStub ? StubNLFLandmarker() : makeLiveNLFLandmarker()
 
         // In synthetic stub mode, fire a one-shot Recenter shortly after start so
         // the streamed `/rotation` is the CALIBRATED, rest-relative euler (≈ 0 at

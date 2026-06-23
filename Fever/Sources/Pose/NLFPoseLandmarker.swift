@@ -3,6 +3,13 @@ import CoreImage
 import Foundation
 import simd
 
+/// "camera frame in → SMPL-24 pose out". Both the live sidecar backend and the
+/// headless stub conform, so the pipeline is agnostic.
+public protocol NLFPoseSource: AnyObject {
+    func detect(_ pixelBuffer: CVPixelBuffer, at time: TimeInterval) async -> SMPLPose?
+    func reset()
+}
+
 /// Pose backend backed by the NLF onnxruntime sidecar: downscales each camera
 /// frame to tightly-packed RGB, sends it, and returns SMPL-24 joints. The model
 /// letterboxes internally so the downscale is only bandwidth tuning; the sidecar
@@ -114,5 +121,10 @@ public final class StubNLFLandmarker {
     }
 }
 
+extension NLFPoseLandmarker: NLFPoseSource {}
+extension StubNLFLandmarker: NLFPoseSource {}
+
 /// The live NLF backend, or the synthetic stub if the runtime isn't installed.
-public func makeLiveNLFLandmarker() -> NLFPoseLandmarker? { NLFPoseLandmarker() }
+public func makeLiveNLFLandmarker() -> any NLFPoseSource {
+    NLFPoseLandmarker() ?? StubNLFLandmarker()
+}
