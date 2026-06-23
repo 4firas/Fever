@@ -44,22 +44,19 @@ public final class TrackingConfig {
     public var sendHeadReference: Bool {
         didSet { UserDefaults.standard.set(sendHeadReference, forKey: Keys.sendHeadReference) }
     }
-    /// Whether the OSC/tracker path mirrors left/right (negates X). DEFAULT true —
-    /// CORRECTED via the PinoFBT wire diff. Apple Vision's solver frame is right-
-    /// handed (+X = camera-right); VRChat is left-handed. We always negate Z for the
-    /// handedness flip, so X must ALSO negate to complete the same right→left
-    /// handedness change — otherwise the skeleton is reflected and lands MIRRORED.
-    /// Ground truth: PinoFBT's LEFT-side trackers sit at −X, ours (un-mirrored) sat
-    /// at +X — a pure left↔right reflection. That both (a) showed joints visibly
-    /// flipped in calibrate mode standing still and (b) made VRChat IK fight itself
-    /// on turns (driving the left leg from a right-side tracker → glitching). With
-    /// the X negate ON, our LEFT lands at −X / RIGHT at +X exactly like PinoFBT, and
-    /// the HEAD reference flips with the body (the mapper applies the same M to every
-    /// joint incl. head), so head-relative X signs match too. Composes cleanly with
-    /// hip-sway lateral gain and the XZ-centering latch — both run in solver space
-    /// BEFORE the mapper, so the single post-solve X negate neither double-applies
-    /// nor cancels them. Affects only the OSC CoordinateMapper, never the live
-    /// preview overlay. Still user-toggleable for the rare rear-camera / odd setup.
+    /// Whether the OSC/tracker path negates X. DEFAULT **false** — VERIFIED by a
+    /// live OSC-wire capture diff against PinoFBT (the 1:1 benchmark).
+    ///
+    /// The net MediaPipe-world → VRChat position map is `diag(mirrorSignX, −1, −1)`.
+    /// PinoFBT outputs the anatomical-LEFT limb at NEGATIVE X (and it tracks
+    /// correctly in VRChat), so Fever must match that sign. Captured result:
+    ///   • mirror OFF (det +1): Fever left limb → −X  ✓ matches PinoFBT.
+    ///   • mirror ON  (det −1): Fever left limb → +X  ✗ mirrored.
+    /// The non-obvious reason the signs work out this way: the MediaPipe **Tasks
+    /// API** (Fever) emits world-landmark X with the OPPOSITE sign to the legacy
+    /// MediaPipe **GPU graph** that PinoFBT bundles — so even though PinoFBT's
+    /// binary negates X, Fever must NOT, to land on the same VRChat side. Affects
+    /// only the OSC CoordinateMapper, never the preview. User-toggleable safety hatch.
     public var mirrorTracking: Bool {
         didSet { UserDefaults.standard.set(mirrorTracking, forKey: Keys.mirrorTracking) }
     }
@@ -78,6 +75,20 @@ public final class TrackingConfig {
     /// The old garbage-rotation reasons for keeping this off are resolved.
     public var sendRotation: Bool {
         didSet { UserDefaults.standard.set(sendRotation, forKey: Keys.sendRotation) }
+    }
+    /// Whether `/rotation` is streamed REST-RELATIVE (delta from the Recenter pose)
+    /// instead of ABSOLUTE world orientation. DEFAULT **false** (absolute).
+    ///
+    /// CORRECTED via PinoFBT live OSC capture: PinoFBT streams ABSOLUTE limb
+    /// orientations — at a neutral standing pose its elbows/knees carry real
+    /// non-zero euler (e.g. elbow ≈ (+30,·,−24)), NOT zeros. The old rest-relative
+    /// rebase captured a rest pose on Recenter and emitted `inverse(qRest)·qLive`,
+    /// which ZEROED every joint at the calibration pose — erasing real limb
+    /// orientation and making turns/limbs read wrong. VRChat does its own
+    /// tracker→bone calibration, so it expects absolute poses. Kept as a toggle for
+    /// experimentation, but absolute is the shipping default.
+    public var rotationRestRelative: Bool {
+        didSet { UserDefaults.standard.set(rotationRestRelative, forKey: Keys.rotationRestRelative) }
     }
 
     // MARK: - Body scale
@@ -122,6 +133,15 @@ public final class TrackingConfig {
     /// a possibly-leaning user adds noise. Exposed for tilted / handheld rigs.
     public var levelIncludeRoll: Bool {
         didSet { UserDefaults.standard.set(levelIncludeRoll, forKey: Keys.levelIncludeRoll) }
+    }
+    /// YAW Body-Stabilizer (PinoFBT-style): derive ONE smoothed body-facing yaw
+    /// from the hip and impose it coherently on the torso (hip + chest), so the
+    /// body turns as one stable unit instead of each tracker's monocular yaw
+    /// jittering/flipping when you face away. DEFAULT false (opt-in) — it changes
+    /// the torso yaw, so it's off until validated in-headset; PinoFBT runs its
+    /// equivalent ON. See `YawStabilizer`.
+    public var yawStabilizer: Bool {
+        didSet { UserDefaults.standard.set(yawStabilizer, forKey: Keys.yawStabilizer) }
     }
 
     // MARK: - Body tweaks
@@ -185,20 +205,26 @@ public final class TrackingConfig {
         oscHost = (d.string(forKey: Keys.oscHost)) ?? "127.0.0.1"
         oscPort = d.object(forKey: Keys.oscPort) as? Int ?? 9000
         enableTracker = d.object(forKey: Keys.enableTracker) as? Bool ?? false
-        // DEFAULT true — CORRECTED via PinoFBT wire capture. PinoFBT streams
-        // /tracking/trackers/head/POSITION continuously (~30 Hz); that head point
-        // is the ANCHOR VRChat uses to re-origin the OSC space, which CANCELS the
-        // body trackers' absolute frame offset. With NO head, the body was measured
-        // landing ~2 m off in +X (broken placement, no response to motion). Head is
-        // POSITION-ONLY on the wire (OSCSender.sendHeadPosition) — never head
-        // rotation (that was the earlier slow-yaw-drift; PinoFBT omits it too). The
-        // head position is the head-bone root from the fixed anthropometric skeleton.
-        sendHeadReference = d.object(forKey: Keys.sendHeadReference) as? Bool ?? true
-        // DEFAULT true — see the `mirrorTracking` property doc. X must negate with Z
-        // to complete the right→left handedness flip; un-mirrored landed the whole
-        // skeleton reflected (LEFT parts at +X vs PinoFBT's −X), flipping joints in
-        // calibrate and making IK fight a mirrored skeleton on turns.
-        mirrorTracking = d.object(forKey: Keys.mirrorTracking) as? Bool ?? true
+        // DEFAULT false — An HMD user (Quest) already has an authoritative head; Fever's
+        // FABRICATED head (derived from shoulder/ear geometry) creates a SECOND head that
+        // fights the HMD, causing VRChat to fold the neck to reconcile the conflict
+        // (the 90° neck-fold bug). TrackingPipeline.swift:360-365 already documents
+        // the correct design: "We deliberately send NO head OSC point — ever. The user
+        // wears a Quest HMD, which is the authoritative head."
+        // Toggle ON only for room-scale PC setups WITHOUT an HMD where the head anchor
+        // is needed to origin the OSC space.
+        sendHeadReference = d.object(forKey: Keys.sendHeadReference) as? Bool ?? false
+        // DEFAULT false — VERIFIED by live OSC capture diff against PinoFBT.
+        // KEY FINDING: the MediaPipe Tasks API (what Fever uses) emits world-landmark
+        // X with the OPPOSITE sign to the legacy GPU graph PinoFBT uses. PinoFBT
+        // (works in VRChat) outputs the anatomical-LEFT limb at NEGATIVE X. With
+        // mirror ON, Fever output left at +X (mirrored/wrong); with mirror OFF it
+        // outputs left at −X = matches PinoFBT. So mirror OFF is correct for the
+        // Tasks-API frame (negate Y,Z only, det +1). The earlier "mirror ON to match
+        // PinoFBT's binary signs" was wrong — it ignored the Tasks-API vs legacy-graph
+        // sign difference. (The real "L/R mangle" was broken chest/foot ROTATION, not
+        // position chirality — see rotationRestRelative / OSCSender.rotationSlots.)
+        mirrorTracking = d.object(forKey: Keys.mirrorTracking) as? Bool ?? false
         footTrackersAtAnkle = d.object(forKey: Keys.footTrackersAtAnkle) as? Bool ?? true
         // DEFAULT true — the rotation path is now REBUILT (two in-body axes, no
         // world-up gauge/singularity; locked-roll feet; rest-relative delta from
@@ -206,6 +232,10 @@ public final class TrackingConfig {
         // garbage euler (full -180..180 wraps, stuck axis offsets) is gone, so we
         // stream rotation by default; still user-toggleable for position-only.
         sendRotation = d.object(forKey: Keys.sendRotation) as? Bool ?? true
+        // DEFAULT false = ABSOLUTE world rotation (PinoFBT ground truth, confirmed by
+        // live OSC capture). Rest-relative zeroed real limb orientation at the
+        // Recenter pose; absolute is what VRChat expects. See the property doc.
+        rotationRestRelative = d.object(forKey: Keys.rotationRestRelative) as? Bool ?? false
 
         userHeightMeters = d.object(forKey: Keys.userHeightMeters) as? Double ?? 1.74
 
@@ -238,6 +268,7 @@ public final class TrackingConfig {
 
         bodyStabilizer = d.object(forKey: Keys.bodyStabilizer) as? Bool ?? false
         levelIncludeRoll = d.object(forKey: Keys.levelIncludeRoll) as? Bool ?? false
+        yawStabilizer = d.object(forKey: Keys.yawStabilizer) as? Bool ?? false
 
         jointSize = d.object(forKey: Keys.jointSize) as? Double ?? 1.0
         // Tasteful out-of-the-box exaggeration: a bit of intentional liveliness,
@@ -266,6 +297,7 @@ public final class TrackingConfig {
         static let oscHost = "oscHost"
         static let oscPort = "oscPort"
         static let sendRotation = "sendRotation"
+        static let rotationRestRelative = "rotationRestRelative"
         static let enableTracker = "enableTracker"
         static let sendHeadReference = "sendHeadReference"
         static let mirrorTracking = "mirrorTracking"
@@ -277,6 +309,7 @@ public final class TrackingConfig {
         static let rotationSmoothing = "rotationSmoothing"
         static let bodyStabilizer = "bodyStabilizer"
         static let levelIncludeRoll = "levelIncludeRoll"
+        static let yawStabilizer = "yawStabilizer"
         static let jointSize = "jointSize"
         static let hipExaggerateCoefficient = "hipExaggerateCoefficient"
         static let hipTwistCoefficient = "hipTwistCoefficient"

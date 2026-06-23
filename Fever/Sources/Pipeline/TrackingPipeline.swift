@@ -192,6 +192,10 @@ public final class TrackingPipeline {
         runtime.setLastHead(nil)
 
         let sendHead = config.sendHeadReference
+        // ABSOLUTE rotation by default (PinoFBT ground truth): a Recenter re-latches
+        // scale/floor but does NOT capture a rotation rest pose unless the user has
+        // explicitly opted into rest-relative mode. Snapshot for the detached worker.
+        let captureRotationRest = config.rotationRestRelative
 
         // Wire the frame intake. The CAMERA path uses CameraCapture's internal
         // single-slot mailbox (the delegate stashes; we pull via `nextFrame()`).
@@ -230,13 +234,16 @@ public final class TrackingPipeline {
         // publishes throttled telemetry.
         worker = Task.detached(priority: .userInitiated) {
             while !Task.isCancelled {
-                // Recenter: re-latch the landmarker's scale/floor AND capture the
-                // OSC rotation rest pose from the current standing pose (on this
-                // worker queue, preserving confinement). One Recenter does scale +
-                // floor + rest-rotation together.
+                // Recenter: re-latch the landmarker's scale/floor (on this worker
+                // queue, preserving confinement). Rotation is ABSOLUTE by default
+                // (PinoFBT streams absolute limb orientations), so a Recenter does
+                // NOT zero the rotations — it only captures a rest pose when the user
+                // has explicitly enabled rest-relative mode.
                 if runtime.takeRebaselineRequest() {
                     landmarker.reset()
-                    processor.requestRestCapture()
+                    if captureRotationRest {
+                        processor.requestRestCapture()
+                    }
                 }
 
                 guard let (pixelBuffer, time) = pull() else {
@@ -576,6 +583,9 @@ private final class FrameProcessor: @unchecked Sendable {
     /// that runs before gap-fill. Reference types confined to this worker; reset on
     /// Recenter / run.
     private let footMotion = FootMotionState()
+    /// PinoFBT-style yaw Body-Stabilizer (cross-frame yaw smoothing), injected into
+    /// the value-type solver; gated by `TrackingConfig.yawStabilizer`.
+    private let yawStab = YawStabilizer()
     private let consistency = LandmarkConsistency()
     private var solver: JointSolver
     private var mapper: CoordinateMapper
@@ -597,7 +607,7 @@ private final class FrameProcessor: @unchecked Sendable {
         self.rotationState = RotationState()
         self.rotationRebaser = RotationRebaser(smoothingFactor: config.rotationSmoothingF)
         self.solver = JointSolver(settings: config, rotationState: self.rotationState,
-                                  footMotionState: self.footMotion)
+                                  footMotionState: self.footMotion, yawStabilizer: self.yawStab)
         self.mapper = CoordinateMapper(userHeightMeters: config.userHeightMetersF,
                                        referenceHeightMeters: 1.8,
                                        mirrorHorizontally: config.mirrorTracking)
@@ -615,8 +625,9 @@ private final class FrameProcessor: @unchecked Sendable {
             rotationRebaser.smoothingFactor = config.rotationSmoothingF
             rotationRebaser.reset()
             rotationState.reset()
+            yawStab.reset()
             solver = JointSolver(settings: config, rotationState: rotationState,
-                                 footMotionState: footMotion)
+                                 footMotionState: footMotion, yawStabilizer: yawStab)
             mapper = CoordinateMapper(userHeightMeters: config.userHeightMetersF,
                                       referenceHeightMeters: 1.8,
                                       mirrorHorizontally: config.mirrorTracking)
@@ -642,6 +653,7 @@ private final class FrameProcessor: @unchecked Sendable {
             consistency.reset()
             rotationRebaser.reset()
             rotationState.reset()
+            yawStab.reset()
             frameCount = 0
             windowStart = 0
             measuredFPS = 0

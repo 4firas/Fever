@@ -96,6 +96,41 @@ public func quaternionFromBoneSafe(direction: SIMD3<Float>,
     return quaternionFromFrame(forward: boneDir, right: right, up: up)
 }
 
+/// Swing–twist decomposition of `q` about the unit axis `a`:
+///   q == swing * twist,  where `twist` is the rotation purely about `a`
+///   and `swing` carries the remaining (off-axis) rotation.
+/// Returns the swing quaternion plus the SIGNED twist angle (radians) about `a`.
+/// Reconstruct with `swing * simd_quatf(angle: newAngle, axis: a)` to replace the
+/// twist while preserving the swing — the yaw stabilizer uses this to smooth ONLY
+/// the body's yaw (twist about world-up) without touching pitch/roll.
+@inlinable
+public func swingTwist(_ q: simd_quatf, axis a: SIMD3<Float>) -> (swing: simd_quatf, twistAngle: Float) {
+    let qn: simd_quatf = {
+        let l = simd_length(q.vector)
+        return l > 1e-6 ? simd_quatf(vector: q.vector / l) : simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+    }()
+    let axis = simd_normalize(a)
+    let proj = axis * simd_dot(qn.imag, axis)          // imag component along a
+    var twist = simd_quatf(ix: proj.x, iy: proj.y, iz: proj.z, r: qn.real)
+    let tl = simd_length(twist.vector)
+    twist = tl > 1e-6 ? simd_quatf(vector: twist.vector / tl) : simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
+    let swing = qn * twist.inverse
+    // Signed angle about a: twist = (cos θ/2, sin θ/2 · a) ⇒ θ = 2·atan2(sin, cos).
+    let s = simd_dot(twist.imag, axis)
+    let angle = 2 * atan2(s, twist.real)
+    return (swing, angle)
+}
+
+/// Shortest signed delta (radians) from angle `a` to `b`, wrapped to (−π, π], so
+/// low-passing a yaw across the ±π seam never takes the long way around.
+@inlinable
+public func shortestAngleDelta(from a: Float, to b: Float) -> Float {
+    var d = (b - a).truncatingRemainder(dividingBy: 2 * .pi)
+    if d > .pi { d -= 2 * .pi }
+    if d < -.pi { d += 2 * .pi }
+    return d
+}
+
 /// Slerp wrapper that guards against NaN / zero-length quats.
 @inlinable
 public func safeSlerp(_ a: simd_quatf, _ b: simd_quatf, _ t: Float) -> simd_quatf {

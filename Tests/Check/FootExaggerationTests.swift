@@ -34,9 +34,10 @@ enum FootExaggerationTests {
             guard let f = leftFoot(solver.solve(pose(leftAnkle: SIMD3(0.05, -0.70, 0.12)))) else {
                 t.check(false, "no foot"); return
             }
-            t.close(f.position.x, 0.05, tol: 1e-3, "x literal")
-            t.close(f.position.y, -0.70, tol: 1e-3, "y literal")
-            t.close(f.position.z, 0.12, tol: 1e-3, "z literal")
+            // Foot is at the HEEL = ankle + (0, −0.04, −0.04): (0.05, −0.74, 0.08).
+            t.close(f.position.x, 0.05, tol: 1e-3, "x literal (heel)")
+            t.close(f.position.y, -0.74, tol: 1e-3, "y literal (heel)")
+            t.close(f.position.z, 0.08, tol: 1e-3, "z literal (heel)")
         }
 
         t.test("STEP: a planted foot is not exaggerated (swing ≈ 0, stays glued)") {
@@ -49,7 +50,7 @@ enum FootExaggerationTests {
             for _ in 0..<12 { f = leftFoot(solver.solve(pose(leftAnkle: SIMD3(-0.04, -0.86, 0.0)))) }
             guard let f else { t.check(false, "no foot"); return }
             t.check(abs(f.position.x - (-0.04)) < 0.03, "planted foot ≈ literal x (no stride amp): \(f.position.x)")
-            t.check(abs(f.position.y - (-0.86)) < 0.01, "planted foot stays on the floor: \(f.position.y)")
+            t.check(abs(f.position.y - (-0.90)) < 0.01, "planted foot stays on the floor (heel y): \(f.position.y)")
         }
 
         t.test("STEP: a swinging foot's stride and lift are amplified") {
@@ -62,11 +63,12 @@ enum FootExaggerationTests {
             var f: VRJoint?
             for _ in 0..<14 { f = leftFoot(solver.solve(pose(leftAnkle: stepped))) }
             guard let f else { t.check(false, "no foot"); return }
-            t.check(f.position.z > 0.12 + 1e-3, "stride amplified on Z (> raw 0.12): \(f.position.z)")
-            t.check(f.position.y > -0.71 + 1e-3, "lift amplified up (> raw -0.71): \(f.position.y)")
+            // Foot point is the HEEL: stepped heel = (−0.10, −0.75, 0.08).
+            t.check(f.position.z > 0.08 + 1e-3, "stride amplified on Z (> raw heel 0.08): \(f.position.z)")
+            t.check(f.position.y > -0.75 + 1e-3, "lift amplified up (> raw heel -0.75): \(f.position.y)")
             // And bounded by the clamps (never thrown away): stride ≤ 0.22 over raw.
-            t.check(f.position.z < 0.12 + 0.22 + 1e-3, "stride stays clamped")
-            print(String(format: "  [step] z 0.12->%.3f  y -0.71->%.3f", f.position.z, f.position.y))
+            t.check(f.position.z < 0.08 + 0.22 + 1e-3, "stride stays clamped")
+            print(String(format: "  [step] z 0.08->%.3f  y -0.75->%.3f", f.position.z, f.position.y))
         }
     }
 }

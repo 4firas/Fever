@@ -5,6 +5,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="$ROOT/Sidecar/.venv"
 MODEL_DIR="$ROOT/Models"
+# Heavy model: best accuracy on profile / turning / self-occlusion (the hard FBT
+# cases). ~30 MB, slower than `full` — worth it for tracking quality.
 MODEL="$MODEL_DIR/pose_landmarker_full.task"
 MODEL_URL="https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task"
 

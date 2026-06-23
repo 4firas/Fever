@@ -39,12 +39,20 @@ public struct JointSolver {
     /// foot exaggeration is then a no-op (literal foot position).
     public let footMotionState: FootMotionState?
 
+    /// Cross-frame yaw smoothing state (PinoFBT-style Body Stabilizer). Reference
+    /// type owned by FrameProcessor, confined to the serial worker. `nil` (and the
+    /// `settings.yawStabilizer` gate off) → no yaw stabilization (the per-bone
+    /// rotations are used as-is). See `YawStabilizer`.
+    public let yawStabilizer: YawStabilizer?
+
     public init(settings: TrackingConfig,
                 rotationState: RotationState? = nil,
-                footMotionState: FootMotionState? = nil) {
+                footMotionState: FootMotionState? = nil,
+                yawStabilizer: YawStabilizer? = nil) {
         self.settings = settings
         self.rotationState = rotationState
         self.footMotionState = footMotionState
+        self.yawStabilizer = yawStabilizer
     }
 
     /// Hold-last for `joint` from the injected `rotationState` (identity if none).
@@ -68,11 +76,9 @@ public struct JointSolver {
 
         // --- Head ---
         let head = solveHead(l, scale: s)
-        joints.append(head)
 
-        // --- Chest ---
-        let chest = solveChest(l, scale: s, head: head)
-        joints.append(chest)
+        // --- Chest --- (var: the yaw stabilizer may re-impose the torso yaw below)
+        var chest = solveChest(l, scale: s)
 
         // --- Hip ---
         // Stance center = floor-projected midpoint of the two ankles (the base of
@@ -89,12 +95,24 @@ public struct JointSolver {
         // back". Ramp the exaggeration off as a foot leaves the floor (ankle Y gap).
         let ankleYGap = abs(l[.leftAnkle].position.y - l[.rightAnkle].position.y)
         let stancePlanted = stancePlantedFactor(ankleYGap)
-        let hip = solveHip(l, scale: s, chest: chest)
-        joints.append(applyHipAdjustments(hip,
-                                          chest: chest,
-                                          stanceCenter: solverPosition(stanceCenterRaw, scale: s),
-                                          stanceWidth: stanceWidthRaw * s,
-                                          stancePlanted: stancePlanted))
+        var hip = applyHipAdjustments(solveHip(l, scale: s, chest: chest),
+                                      chest: chest,
+                                      stanceCenter: solverPosition(stanceCenterRaw, scale: s),
+                                      stanceWidth: stanceWidthRaw * s,
+                                      stancePlanted: stancePlanted)
+
+        // --- YAW Body-Stabilizer --- (opt-in) Impose ONE smoothed body-facing yaw
+        // (taken from the hip, the body root) coherently on the torso (hip + chest)
+        // so it turns as a stable unit; each tracker keeps its own pitch/roll.
+        if settings.yawStabilizer, let ys = yawStabilizer {
+            let bodyYaw = ys.update(reference: hip.rotation)
+            hip.rotation = ys.imposeYaw(hip.rotation, yaw: bodyYaw)
+            chest.rotation = ys.imposeYaw(chest.rotation, yaw: bodyYaw)
+        }
+
+        joints.append(head)
+        joints.append(chest)
+        joints.append(hip)
 
         // --- Elbows ---
         joints.append(solveElbow(.leftElbow,
@@ -116,15 +134,20 @@ public struct JointSolver {
             solveKnee(.rightKnee,
                       hip: l[.rightHip], knee: l[.rightKnee], ankle: l[.rightAnkle], scale: s)))
 
-        // --- Feet --- (solve, then step/stride exaggeration via FootMotionState)
+        // --- Feet --- (solve, then step/stride exaggeration via FootMotionState).
+        // The exaggeration neutral MUST track the SAME point used for the foot
+        // position (the heel, or the toe fallback), so the foot↔neutral delta has no
+        // constant heel-vs-ankle offset baked into it.
+        let lFootPt = settings.footTrackersAtAnkle ? l[.leftHeel].position : l[.leftFootIndex].position
+        let rFootPt = settings.footTrackersAtAnkle ? l[.rightHeel].position : l[.rightFootIndex].position
         joints.append(applyFootAdjustments(
             solveFoot(.leftFoot, ankle: l[.leftAnkle], knee: l[.leftKnee],
                       heel: l[.leftHeel], toe: l[.leftFootIndex], scale: s),
-            type: .leftFoot, rawAnkle: l[.leftAnkle].position, scale: s))
+            type: .leftFoot, rawFoot: lFootPt, scale: s))
         joints.append(applyFootAdjustments(
             solveFoot(.rightFoot, ankle: l[.rightAnkle], knee: l[.rightKnee],
                       heel: l[.rightHeel], toe: l[.rightFootIndex], scale: s),
-            type: .rightFoot, rawAnkle: l[.rightAnkle].position, scale: s))
+            type: .rightFoot, rawFoot: rFootPt, scale: s))
 
         return joints
     }
@@ -160,7 +183,11 @@ public struct JointSolver {
         let neckLen = Self.referenceNeckFraction * 1.8
         let upRawHead = earMid - shMid
         let headRoot: SIMD3<Float>
-        if simd_length(upRawHead) > 1e-5 {
+        // Guard against ears at or below shoulder level (off-frame / low-vis landmark):
+        // a degenerate down-pointing vector would place the head root beside or
+        // below the shoulders → VRChat folds the neck to reach it. Fall back to
+        // anatomically correct world-up when the ear estimate is unreliable.
+        if simd_length(upRawHead) > 1e-5 && upRawHead.y > 0 {
             headRoot = shMid + simd_normalize(upRawHead) * neckLen
         } else {
             headRoot = shMid + SIMD3<Float>(0, neckLen, 0)
@@ -189,14 +216,19 @@ public struct JointSolver {
 
     // MARK: Chest
 
-    private func solveChest(_ l: [NormalizedLandmark], scale: Float, head: VRJoint) -> VRJoint {
+    private func solveChest(_ l: [NormalizedLandmark], scale: Float) -> VRJoint {
         let shMid = (l[.leftShoulder].position + l[.rightShoulder].position) * 0.5
+        let hipMid = (l[.leftHip].position + l[.rightHip].position) * 0.5
         let pos = solverPosition(shMid, scale: scale)
-        // OSC ROTATION (two in-body axes, no world-up gauge): primary = chest→neck
-        // (here the head-root above the shoulders ≈ neck), secondary = the shoulder
-        // line (leftShoulder→rightShoulder). Degenerate frame holds last.
+        // OSC ROTATION (two in-body axes, no world-up gauge): primary = the torso
+        // SPINE (hip-mid → shoulder-mid), secondary = the shoulder line
+        // (leftShoulder→rightShoulder). VERIFIED vs PinoFBT: the chest must follow
+        // the spine, NOT the head/neck — the old `chest→neck` (shoulder→ear) up
+        // tilted the chest forward with the head (~20° spurious pitch at neutral).
+        // Using the spine makes the chest ≈ the hip at rest (rigid torso, chest ≈0),
+        // while the shoulder-vs-hip line difference still captures torso twist.
         let right = l[.rightShoulder].position - l[.leftShoulder].position
-        let up = (head.position / max(scale, 1e-5)) - shMid   // chest → neck
+        let up = shMid - hipMid   // torso spine
         let rot = frameFromTwoAxes(primary: up, secondary: right, holdLast: held(.chest))
         record(.chest, rot)
         let conf = min(l[.leftShoulder].visibility, l[.rightShoulder].visibility)
@@ -259,40 +291,35 @@ public struct JointSolver {
                            heel: NormalizedLandmark,
                            toe: NormalizedLandmark,
                            scale: Float) -> VRJoint {
-        // POSITION: VRChat FBT treats the "foot" tracker as an ANKLE tracker, so
-        // when `footTrackersAtAnkle` is set (default) we place it at the ankle
-        // landmark; otherwise we fall back to the synthesized toe (foot-index).
-        let positionSource = settings.footTrackersAtAnkle ? ankle.position : toe.position
+        // POSITION: PinoFBT keys the foot tracker off the detected HEEL landmark
+        // (29/30) — the ground-contact point, lower and steadier for floor-anchoring
+        // than the ankle. When `footTrackersAtAnkle` is set (default) we place the
+        // tracker there; otherwise we fall back to the toe (foot-index). `ankle` is
+        // retained for the shank-fallback rotation below.
+        let positionSource = settings.footTrackersAtAnkle ? heel.position : toe.position
         let pos = solverPosition(positionSource, scale: scale)
 
         // OSC ROTATION — REAL FOOT FRAME from the DETECTED heel→toe vector.
-        // MediaPipe actually detects the heel (29/30) and foot-index (31/32) — the
-        // old Vision path SYNTHESIZED them as constants, which is why the foot
-        // could never follow the real ankle and instead spun off the shank. The
-        // foot's true pointing direction now drives orientation:
-        //   forward = heel → toe   → real foot YAW (turn your foot) and PITCH
-        //             (point your toes); it responds to ANKLE motion, not the leg.
-        //   up      = world-up with the forward component removed (Gram-Schmidt),
-        //             so pitch follows the toe while ROLL stays locked (a single
-        //             camera has no reliable foot roll).
+        // MediaPipe detects the heel (29/30) and foot-index (31/32); the foot's true
+        // pointing direction drives orientation. VERIFIED vs PinoFBT (which uses the
+        // heel→toe `toeDir`): the foot's forward IS the primary axis, so it carries
+        //   • PITCH — point your toes up/down,  and
+        //   • YAW   — turn your foot,
+        // while a worldUp SECONDARY locks ROLL (a single camera has no reliable foot
+        // roll). The OLD frame did the opposite — primary = vertical up — which
+        // FORCED the foot upright (pitch locked out) and let yaw/roll go wild
+        // (captured feet read yaw ≈ −150°, roll ≈ −57° at a flat stand).
         // Falls back to the shank's ground projection if the foot landmarks
         // collapse/occlude; a fully degenerate frame holds last (never fabricates).
         let worldUp = SIMD3<Float>(0, 1, 0)
         var forward = toe.position - heel.position
         if simd_length(forward) < 1e-4 {
             let shank = ankle.position - knee.position
-            forward = shank - worldUp * simd_dot(shank, worldUp)   // ground projection
+            forward = shank - worldUp * simd_dot(shank, worldUp)   // shin ground projection
         }
-        var up = worldUp
-        let fl = simd_length(forward)
-        if fl > 1e-4 {
-            let f = forward / fl
-            let perp = worldUp - f * simd_dot(f, worldUp)
-            if simd_length(perp) > 1e-4 { up = simd_normalize(perp) }
-        }
-        let rot = frameFromTwoAxes(primary: up, secondary: forward, holdLast: held(type))
+        let rot = frameFromTwoAxes(primary: forward, secondary: worldUp, holdLast: held(type))
         record(type, rot)
-        let conf = settings.footTrackersAtAnkle ? ankle.visibility : toe.visibility
+        let conf = settings.footTrackersAtAnkle ? heel.visibility : toe.visibility
         return VRJoint(type: type, position: pos, rotation: rot, confidence: conf)
     }
 
@@ -413,9 +440,9 @@ public struct JointSolver {
     /// exactly like the hip sway, so the single downstream X-negate/Z-flip neither
     /// double-applies nor cancels it.
     private func applyFootAdjustments(_ foot: VRJoint, type: JointType,
-                                      rawAnkle: SIMD3<Float>, scale: Float) -> VRJoint {
+                                      rawFoot: SIMD3<Float>, scale: Float) -> VRJoint {
         guard let fms = footMotionState else { return foot }
-        let (neutralRaw, swing) = fms.update(type, rawAnkle: rawAnkle)
+        let (neutralRaw, swing) = fms.update(type, rawAnkle: rawFoot)
         let neutral = solverPosition(neutralRaw, scale: scale)   // same frame as foot.position
         var j = foot
 

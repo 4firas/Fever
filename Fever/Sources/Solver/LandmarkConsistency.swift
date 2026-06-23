@@ -9,9 +9,11 @@ import Foundation
 ///
 ///  1. LEFT/RIGHT SWAP under self-occlusion (in profile the near leg occludes the
 ///     far one; MediaPipe transposes the L/R labels frame-to-frame → a one-frame
-///     teleport). We re-assign each L/R pair to whichever labelling is closest to
-///     the previous accepted frame, with a hysteresis margin so borderline frames
-///     never chatter.
+///     teleport). We re-assign a pair ONLY when it teleports — a large single-frame
+///     jump the swap explains far better. A smooth body TURN moves each landmark a
+///     little per frame and is left alone, so the anti-swap no longer fights
+///     MediaPipe's correct tracking through a rotation (which used to cross the
+///     torso into an X and stick).
 ///  2. OCCLUDED-LIMB HALLUCINATION. MediaPipe emits ALL 33 landmarks every frame,
 ///     even fully occluded ones, as confidently-placed GUESSES (visibility is the
 ///     only signal they are fabricated). We gate on visibility with hysteresis and
@@ -42,11 +44,26 @@ public final class LandmarkConsistency: @unchecked Sendable {
         (BlazePose.Landmark.leftWrist.rawValue,     BlazePose.Landmark.rightWrist.rawValue),
     ]
 
-    /// Swap only when clearly cheaper than keeping (hysteresis band stops chatter).
-    private let swapMargin: Float = 0.3
+    /// Minimum keep-cost (metres) before a swap is even considered: a real
+    /// MediaPipe L/R transposition is a SINGLE-FRAME teleport (the two landmarks
+    /// jump ~0.2–0.4 m apart at once), whereas a body TURN moves each landmark only
+    /// ~0.01–0.04 m per frame. Gating on this teleport distance is what stops the
+    /// anti-swap from mis-firing during a smooth turn (the bug that crossed the
+    /// torso into an X and then stuck, because the swap was written back to `prev`).
+    private let swapTeleport: Float = 0.15
+    /// And the swap must explain that teleport much better than keeping (costSwap
+    /// well under half of costKeep), so only a clear transposition flips.
+    private let swapRatio: Float = 0.5
+    /// Each landmark must also land within this distance of the PARTNER's previous
+    /// position (not just have a lower total cost). This prevents false swaps when
+    /// both limbs cross simultaneously: crossing wrists move 20–30 cm but each ends
+    /// up 5+ cm from the other's old position, whereas a true MediaPipe L/R label
+    /// transposition means A lands ≈ exactly where B was and vice-versa (≤ 4 cm).
+    private let swapSymmetryTolerance: Float = 0.04
     /// Don't reorder a pair when either landmark is occluded (its position is a
-    /// guess) — gating/hold-last handles those.
-    private let minSwapVisibility: Float = 0.3
+    /// guess) — raise this to match the engage threshold (vOn) so a freshly
+    /// re-engaged borderline landmark is never reassigned while still untrustworthy.
+    private let minSwapVisibility: Float = 0.5
     /// Visibility hysteresis: engage at vOn, disengage at vOff (kills the noisy
     /// 0.86<->0.92 flicker MediaPipe shows on borderline landmarks).
     private let vOn: Float = 0.5
@@ -75,7 +92,16 @@ public final class LandmarkConsistency: @unchecked Sendable {
                 let pa = lm[a].position, pb = lm[b].position
                 let costKeep = simd_distance(pa, prev[a]) + simd_distance(pb, prev[b])
                 let costSwap = simd_distance(pa, prev[b]) + simd_distance(pb, prev[a])
-                if costSwap < costKeep * (1 - swapMargin) {
+                // Only correct a genuine single-frame transposition: (1) the kept labels
+                // must have TELEPORTED (not just drifted), (2) the swap must explain it
+                // far better, AND (3) each landmark must land within swapSymmetryTolerance
+                // of where the OTHER one was — a true label swap means A lands where B
+                // was and B lands where A was, so both individual distances are near zero.
+                // Crossing limbs produce a low total-cost swap but each individual distance
+                // is 5+ cm → condition (3) rejects them without touching real transpositions.
+                if costKeep > swapTeleport, costSwap < costKeep * swapRatio,
+                   simd_distance(pa, prev[b]) < swapSymmetryTolerance,
+                   simd_distance(pb, prev[a]) < swapSymmetryTolerance {
                     lm.swapAt(a, b)
                     img.swapAt(a, b)
                 }

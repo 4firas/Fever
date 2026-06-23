@@ -67,6 +67,10 @@ struct FeverCheck {
         LevelEstimatorTests.run(t)
         BodyStabilizerTests.run(t)
         LeveledBoxTests.run(t)
+        WireParityTests.run(t)
+        RotationSolverTests.run(t)
+        YawStabilizerTests.run(t)
+        ConfigPersistenceTests.run(t)
         MediaPipeFrameTests.run(t)
         PoseSidecarPathTests.run(t)
         await MediaPipeLandmarkerTests.run(t)
@@ -370,11 +374,11 @@ struct FeverCheck {
         }
 
         // Stub landmark anchors (jointSize default 1.0, so position == landmark).
-        let ankleY: Float = 0.95   // lm[27]/lm[28]
+        let heelY: Float = 0.97    // lm[29]/lm[30] — PinoFBT foot point
         let toeY: Float = 1.00     // lm[31]/lm[32]
         let footX: Float = 0.10    // |c ± 0.10|
 
-        t.test("Foot tracker placed at ANKLE when footTrackersAtAnkle true") {
+        t.test("Foot tracker placed at the HEEL when footTrackersAtAnkle true (PinoFBT foot point)") {
             let cfg = TrackingConfig()
             cfg.footTrackersAtAnkle = true
             let joints = JointSolver(settings: cfg).solve(pose)
@@ -382,14 +386,14 @@ struct FeverCheck {
                   let rf = joints.first(where: { $0.type == .rightFoot }) else {
                 t.check(false, "missing foot joints"); return
             }
-            // Y must be at the ankle, NOT the toe.
-            t.close(lf.position.y, ankleY, tol: 1e-3, "leftFoot y at ankle")
-            t.close(rf.position.y, ankleY, tol: 1e-3, "rightFoot y at ankle")
+            // Y must be at the heel, NOT the toe.
+            t.close(lf.position.y, heelY, tol: 1e-3, "leftFoot y at heel")
+            t.close(rf.position.y, heelY, tol: 1e-3, "rightFoot y at heel")
             t.check(abs(lf.position.y - toeY) > 1e-2,
-                    "leftFoot must NOT sit at the toe when ankle-mode: \(lf.position.y)")
-            // X at the ankle landmark (left negative, right positive of center).
-            t.close(lf.position.x, 0.5 - footX, tol: 1e-3, "leftFoot x at ankle")
-            t.close(rf.position.x, 0.5 + footX, tol: 1e-3, "rightFoot x at ankle")
+                    "leftFoot must NOT sit at the toe in heel-mode: \(lf.position.y)")
+            // X at the heel landmark (left negative, right positive of center).
+            t.close(lf.position.x, 0.5 - footX, tol: 1e-3, "leftFoot x at heel")
+            t.close(rf.position.x, 0.5 + footX, tol: 1e-3, "rightFoot x at heel")
         }
 
         t.test("Foot tracker placed at TOE when footTrackersAtAnkle false") {
@@ -399,9 +403,9 @@ struct FeverCheck {
             guard let lf = joints.first(where: { $0.type == .leftFoot }) else {
                 t.check(false, "missing left foot joint"); return
             }
-            t.close(lf.position.y, toeY, tol: 1e-3, "leftFoot y at toe when ankle-mode off")
-            t.check(abs(lf.position.y - ankleY) > 1e-2,
-                    "leftFoot must move off the ankle when ankle-mode off: \(lf.position.y)")
+            t.close(lf.position.y, toeY, tol: 1e-3, "leftFoot y at toe when heel-mode off")
+            t.check(abs(lf.position.y - heelY) > 1e-2,
+                    "leftFoot must move off the heel when heel-mode off: \(lf.position.y)")
         }
     }
 

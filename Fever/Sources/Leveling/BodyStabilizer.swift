@@ -52,16 +52,19 @@ public final class BodyStabilizer: @unchecked Sendable {
             let w = reply.world[l.rawValue]
             return SIMD3(w.x, -w.y, w.z * zSign)
         }
-        let neck = (fixed(.leftShoulder) + fixed(.rightShoulder)) * 0.5
         let midHip = (fixed(.leftHip) + fixed(.rightHip)) * 0.5
         let nose = fixed(.nose)
         let lAnkle = fixed(.leftAnkle)
         let rAnkle = fixed(.rightAnkle)
+        // Foot midpoint used as the gravity reference (hip-to-foot = "up").
+        // Feet are nearly directly below the hips regardless of torso lean,
+        // so this avoids baking natural shoulder-forward posture into the datum.
+        let footMid = (lAnkle + rAnkle) * 0.5
 
         return lock.withLock {
             let upright = LevelEstimator.uprightSanity(nose: nose, midHip: midHip,
                                                        leftAnkle: lAnkle, rightAnkle: rAnkle)
-            let raw = LevelEstimator.levelingQuaternion(neck: neck, midHip: midHip,
+            let raw = LevelEstimator.levelingQuaternion(midHip: midHip, footMid: footMid,
                                                         includeRoll: _includeRoll)
             lost = !upright
 

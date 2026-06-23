@@ -95,9 +95,19 @@ struct SettingsView: View {
     private var oscTab: some View {
         Form {
             Section("Output") {
-                TextField("Host", text: $config.oscHost)
-                TextField("Port", value: $config.oscPort, format: .number.grouping(.never))
-                Text("VRChat receives OSC on UDP 9000 by default.")
+                // Explicit get/set bindings that write through on EVERY edit (and a
+                // trim), so the value can't be lost if the field never "commits"
+                // before you switch to VRChat — the cause of "I set the Quest IP but
+                // it kept sending to 127.0.0.1". Persistence itself is handled by the
+                // config's didSet (regression-tested in ConfigPersistenceTests).
+                TextField("Host", text: Binding(
+                    get: { config.oscHost },
+                    set: { config.oscHost = $0.trimmingCharacters(in: .whitespacesAndNewlines) }))
+                    .onSubmit { /* commit-on-Return is already covered by the set above */ }
+                TextField("Port", text: Binding(
+                    get: { String(config.oscPort) },
+                    set: { if let p = Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) { config.oscPort = p } }))
+                Text("VRChat receives OSC on UDP 9000 by default. The Quest's IP changes on reconnect — set a DHCP reservation to keep it fixed.")
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
             }
@@ -112,9 +122,9 @@ struct SettingsView: View {
                 }
             }
             Section {
-                Toggle("Send head reference", isOn: $config.sendHeadReference)
+                Toggle("Send head reference (PC/no HMD only)", isOn: $config.sendHeadReference)
             } footer: {
-                Text("Streams /tracking/trackers/head to align the tracking space to your avatar's head.")
+                Text("OFF by default. Keep OFF with a Quest/HMD — the headset is already the authoritative head and enabling this creates a conflicting second head that folds the neck in VRChat. Enable only for PC setups without a head-mounted display.")
                     .foregroundStyle(Theme.textSecondary)
             }
             Section {
@@ -126,7 +136,13 @@ struct SettingsView: View {
             Section {
                 Toggle("Send rotation", isOn: $config.sendRotation)
             } footer: {
-                Text("Off (recommended) = position-only trackers — the working config that matches PinoFBT. VRChat's IK solves limb rotation from positions. Our rotation still needs rework before it helps, so only turn this on to experiment. The head is always position-only regardless.")
+                Text("Streams /rotation for all body trackers (hip, chest, feet, knees, elbows) — PinoFBT parity. The per-bone solver is fixed: chest follows the spine, feet follow heel→toe with roll locked. The head is always position-only.")
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            Section {
+                Toggle("Yaw stabilizer (Body Stabilizer)", isOn: $config.yawStabilizer)
+            } footer: {
+                Text("PinoFBT-style: derives one smoothed body-facing yaw and imposes it on the torso (hip + chest) so the body turns as a stable unit — less yaw jitter/flip when you face away. Opt-in; enable and test in-headset.")
                     .foregroundStyle(Theme.textSecondary)
             }
         }
@@ -152,9 +168,9 @@ struct SettingsView: View {
                 }
             }
             Section {
-                Toggle("Foot trackers at ankle", isOn: $config.footTrackersAtAnkle)
+                Toggle("Foot trackers at heel", isOn: $config.footTrackersAtAnkle)
             } footer: {
-                Text("Places the left/right foot trackers at the ankle (standard VRChat FBT). Off uses the toe position instead.")
+                Text("Places the left/right foot trackers at the detected heel (PinoFBT's foot point — lower and steadier for floor contact). Off uses the toe position instead.")
                     .foregroundStyle(Theme.textSecondary)
             }
         }

@@ -66,6 +66,25 @@ enum LandmarkConsistencyTests {
                     "no false swap on small motion")
         }
 
+        t.test("CONSISTENCY: a smooth turn (gradual L/R crossing) does NOT trigger a swap") {
+            let c = LandmarkConsistency()
+            // Hips cross over many SMALL steps, as in a real body turn. MediaPipe
+            // tracks L/R correctly through it; the anti-swap must not fight that —
+            // the bug that crossed the torso into an X and stuck after a turn.
+            let steps: [Float] = [-0.10, -0.06, -0.02, 0.02, 0.06, 0.10]
+            var out = c.process(pose([(.leftHip, SIMD3(steps[0], 0, 0), 0.9),
+                                      (.rightHip, SIMD3(-steps[0], 0, 0), 0.9)]))
+            for s in steps.dropFirst() {
+                out = c.process(pose([(.leftHip, SIMD3(s, 0, 0), 0.9),
+                                      (.rightHip, SIMD3(-s, 0, 0), 0.9)]))
+            }
+            // Left hip tracked smoothly to +0.10 — it must STILL be the left hip.
+            t.check(out[.leftHip].position.x > 0.05,
+                    "left hip kept its identity through the turn (no spurious swap): \(out[.leftHip].position.x)")
+            t.check(out[.rightHip].position.x < -0.05,
+                    "right hip kept its identity through the turn: \(out[.rightHip].position.x)")
+        }
+
         t.test("CONSISTENCY: an occluded (low-visibility) landmark is gated to absent") {
             let c = LandmarkConsistency()
             _ = c.process(pose([(.leftAnkle, SIMD3(-0.10, -0.8, 0), 0.9)]))   // seed engaged
@@ -81,6 +100,24 @@ enum LandmarkConsistencyTests {
             let out = c.process(pose([(.leftAnkle, SIMD3(-0.1, -0.8, 0), 0.45)]))
             t.check(out[.leftAnkle].visibility > 0,
                     "0.45 between vOff and vOn stays engaged (hysteresis): \(out[.leftAnkle].visibility)")
+        }
+
+        t.test("CONSISTENCY: wrists crossing simultaneously are NOT swapped (genuine motion, not a transposition)") {
+            let c = LandmarkConsistency()
+            // Frame 1: wrists well separated — left at −0.25, right at +0.25.
+            _ = c.process(pose([(.leftWrist, SIMD3(-0.25, 0.1, 0), 0.9),
+                                (.rightWrist, SIMD3( 0.25, 0.1, 0), 0.9)]))
+            // Frame 2: both wrists cross to the OTHER side simultaneously (e.g. arms cross in front).
+            // MediaPipe correctly tracks them: leftWrist is now at +0.20, rightWrist at −0.20.
+            // costKeep = 0.45+0.45 = 0.90 > 0.15, costSwap = 0.05+0.05 = 0.10 < 0.45.
+            // OLD code: fires the swap → wrong. NEW code: requires each to land within 4 cm
+            // of the partner's previous — 5 cm away → does NOT fire.
+            let out = c.process(pose([(.leftWrist, SIMD3( 0.20, 0.1, 0), 0.9),
+                                      (.rightWrist, SIMD3(-0.20, 0.1, 0), 0.9)]))
+            t.check(out[.leftWrist].position.x > 0,
+                    "leftWrist tracked to +x by MediaPipe must stay +x (no false swap): \(out[.leftWrist].position.x)")
+            t.check(out[.rightWrist].position.x < 0,
+                    "rightWrist tracked to −x by MediaPipe must stay −x (no false swap): \(out[.rightWrist].position.x)")
         }
     }
 }

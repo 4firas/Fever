@@ -37,17 +37,20 @@ enum LeveledBoxTests {
         func width(_ b: LeveledBox) -> Float { simd_length(b.corners[1] - b.corners[0]) }  // TL→TR
         func height(_ b: LeveledBox) -> Float { simd_length(b.corners[3] - b.corners[0]) } // TL→BL
 
-        t.test("BOX: upright → a valid LEVEL square") {
+        t.test("BOX: upright → a valid LEVEL box taller than wide (body proportions)") {
             let f = frame(spine: SIMD3(0, 0.5, 0))
             let b = LeveledBoxBuilder.build(landmarks: f.lm, imagePoints: f.img)
             t.check(b.valid, "upright box is valid")
             t.check(b.corners.count == 4, "four corners")
             t.close(topTilt(b), 0, tol: 1e-4, "top edge is horizontal (level)")
             t.close(sideTilt(b), 0, tol: 1e-4, "side edge is vertical (level)")
-            t.close(width(b), height(b), tol: 1e-3, "square (width ≈ height)")
+            // Box is now built from metric body proportions — TALL (legs below, head above)
+            // and narrower in width. No longer a square; height > width.
+            t.check(height(b) > width(b) * 1.2,
+                    "box is tall (body proportions): h=\(height(b)) w=\(width(b))")
         }
 
-        t.test("BOX: pure TURN (vertical spine, yaw) stays a level square") {
+        t.test("BOX: pure TURN (vertical spine, yaw) stays a level box") {
             // A turned user keeps shoulder-mid directly above hip-mid (spine = +Y),
             // only the shoulders' X/Z swap — the box must NOT tilt.
             var f = frame(spine: SIMD3(0, 0.5, 0))
@@ -75,6 +78,22 @@ enum LeveledBoxTests {
             t.check(b.valid, "forward-bend box valid")
             t.close(topTilt(b), 0, tol: 1e-4, "forward bend keeps the top edge level…")
             t.check(height(b) < height(level) - 0.02, "…but squishes the box vertically (got \(height(b)) vs \(height(level)))")
+        }
+
+        t.test("BOX: box extends further below the hip centre than above (asymmetric body shape)") {
+            // Legs below the hip are longer than the head above it. The metric-proportioned
+            // box must be taller in the bottom half (hip to feet) than the top half (hip to head).
+            let f = frame(spine: SIMD3(0, 0.5, 0))
+            let b = LeveledBoxBuilder.build(landmarks: f.lm, imagePoints: f.img)
+            guard b.valid, b.corners.count == 4 else { t.check(false, "invalid box"); return }
+            // Center is at the HIP image point (0.50, 0.60). Corners:
+            // TL=(corners[0]), TR=(corners[1]) are ABOVE centre (smaller y in screen space).
+            // BL=(corners[3]), BR=(corners[2]) are BELOW centre.
+            let hipImgY: Float = 0.60
+            let topExtent   = hipImgY - b.corners[0].y   // how far above hip centre
+            let bottomExtent = b.corners[3].y - hipImgY   // how far below hip centre
+            t.check(bottomExtent > topExtent * 1.05,
+                    "box extends further below hip (legs) than above (head): bottom=\(bottomExtent) top=\(topExtent)")
         }
 
         t.test("BOX: a head-down crouch makes the box vanish (valid == false)") {

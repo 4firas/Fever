@@ -12,7 +12,12 @@ enum BodyStabilizerTests {
     /// Build a sidecar reply for a standing body; `shoulderZ` leans the spine
     /// toward (+) / away from (−) the camera (simulated camera pitch). `noseY` /
     /// `ankleY` are in MediaPipe y-DOWN (smaller = higher).
+    ///
+    /// Ankle z is derived from shoulderZ: with shoulder 0.5 m above the hip and
+    /// ankle 0.9 m below, the same camera tilt pushes ankles by -1.8×shoulderZ in
+    /// the opposite z direction. This gives exact leveling for `spineDir(shoulderZ)`.
     static func reply(shoulderZ: Float, noseY: Float = -0.7, ankleY: Float = 0.9) -> SidecarReply {
+        let ankleZ = -1.8 * shoulderZ
         var world = [SIMD3<Float>](repeating: .zero, count: 33)
         let vis = [Float](repeating: 1, count: 33)
         func put(_ l: BlazePose.Landmark, _ v: SIMD3<Float>) { world[l.rawValue] = v }
@@ -21,8 +26,8 @@ enum BodyStabilizerTests {
         put(.rightShoulder, SIMD3(0.2, -0.5, shoulderZ))
         put(.leftHip, SIMD3(-0.1, 0, 0))
         put(.rightHip, SIMD3(0.1, 0, 0))
-        put(.leftAnkle, SIMD3(-0.1, ankleY, 0))
-        put(.rightAnkle, SIMD3(0.1, ankleY, 0))
+        put(.leftAnkle, SIMD3(-0.1, ankleY, ankleZ))
+        put(.rightAnkle, SIMD3(0.1, ankleY, ankleZ))
         return SidecarReply(found: true, world: world, visibility: vis, presence: vis, image: [])
     }
 

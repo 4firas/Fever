@@ -30,66 +30,77 @@ public struct LeveledBox: Sendable, Equatable {
 
 /// Builds a `LeveledBox` from one frame's leveled solver landmarks + image points.
 /// Pure and deterministic, so it is unit-testable without the camera/overlay.
+///
+/// The box is sized from METRIC world landmarks (body proportions in metres,
+/// constant at any camera distance) not from the 2D pixel silhouette. This gives
+/// a roomy asymmetric volume — taller below the hip where the legs are, generous
+/// fixed-metre margins — that floats around the user without sticking to the skin,
+/// matching PinoFBT's green reference box behaviour.
 public enum LeveledBoxBuilder {
-    /// Padding multiplier on the body's image-space reach (margin around the body).
-    public static let sizePad: Float = 1.12
 
     public static func build(landmarks: [NormalizedLandmark],
                              imagePoints: [SIMD2<Float>]) -> LeveledBox {
         guard landmarks.count == 33, imagePoints.count == 33 else { return .invalid }
 
+        func world(_ l: BlazePose.Landmark) -> SIMD3<Float> { landmarks[l.rawValue].position }
         func img(_ l: BlazePose.Landmark) -> SIMD2<Float> { imagePoints[l.rawValue] }
-        func solver(_ l: BlazePose.Landmark) -> SIMD3<Float> { landmarks[l.rawValue].position }
         func finite2(_ v: SIMD2<Float>) -> Bool { v.x.isFinite && v.y.isFinite }
 
         let lHipI = img(.leftHip), rHipI = img(.rightHip)
         let lShI = img(.leftShoulder), rShI = img(.rightShoulder)
         guard finite2(lHipI), finite2(rHipI), finite2(lShI), finite2(rShI) else { return .invalid }
-        let centerI = (lHipI + rHipI) * 0.5
 
-        // Spine in the LEVELED solver frame (camera tilt already removed). Upright →
-        // +Y; side-bend tilts it in X; forward-bend tilts it in Z (depth).
-        let neckS = (solver(.leftShoulder) + solver(.rightShoulder)) * 0.5
-        let midHipS = (solver(.leftHip) + solver(.rightHip)) * 0.5
-        let spine = neckS - midHipS
+        let hipMidI = (lHipI + rHipI) * 0.5
+        let shMidI  = (lShI + rShI) * 0.5
+
+        // Metric body axes in the leveled solver frame.
+        let midHipW = (world(.leftHip) + world(.rightHip)) * 0.5
+        let neckW   = (world(.leftShoulder) + world(.rightShoulder)) * 0.5
+        let spine   = neckW - midHipW
         guard simd_length(spine) > 0.05 else { return .invalid }
-        let u = simd_normalize(spine)                       // torso up (solver)
-        let rRaw = simd_cross(u, SIMD3<Float>(0, 0, 1))     // torso right = up × (toward camera)
-        guard simd_length(rRaw) > 1e-3 else { return .invalid }  // spine ∥ view axis (degenerate)
+        let u    = simd_normalize(spine)               // torso up (solver)
+        let rRaw = simd_cross(u, SIMD3<Float>(0, 0, 1))
+        guard simd_length(rRaw) > 1e-3 else { return .invalid }
         let r = simd_normalize(rRaw)
 
-        // Solver axes → image-space directions: image x = +X (un-mirrored preview),
-        // image y is DOWN, so the up axis flips sign. NOT re-normalized in 2D — the
-        // projected magnitude (≤1) carries the foreshortening, so a forward toe-reach
-        // (spine tilts in Z) squishes the box while a side-bend (spine tilts in X)
-        // rolls it. Both read as "angled", a pure turn (vertical spine) stays level.
-        let uImg = SIMD2<Float>(u.x, -u.y)
-        let rImg = SIMD2<Float>(r.x, -r.y)
+        // Projection scale (screen-units / metre) from the spine: when the torso
+        // tilts in Z (forward bend) the 2D spine projection shortens → scale drops
+        // → box squishes, matching real foreshortening.
+        let metricSpineLen = simd_length(spine)
+        let screenSpineLen = simd_length(shMidI - hipMidI)
+        guard screenSpineLen > 1e-4 else { return .invalid }
+        let scale = screenSpineLen / metricSpineLen
+
+        // Screen-space axes (image y is DOWN, so up-axis flips sign), scaled so
+        // 1 m of body maps to `scale` screen-normalised units.
+        let uImg = SIMD2<Float>(u.x, -u.y) * scale
+        let rImg = SIMD2<Float>(r.x, -r.y) * scale
         guard finite2(uImg), finite2(rImg) else { return .invalid }
 
-        // Square half-extent = the body's image-space reach from the hip center
-        // (out to the farthest present joint) plus margin, so the box frames the body.
-        var reach: Float = 0
-        for l in BlazePose.Landmark.allCases {
-            let p = img(l)
-            guard finite2(p) else { continue }
-            reach = Swift.max(reach, simd_length(p - centerI))
-        }
-        guard reach > 1e-3 else { return .invalid }
-        let h = reach * sizePad
+        // Metric half-extents from actual body proportions, with fixed-metre margins
+        // so the box is always off the skin regardless of camera distance.
+        let noseW   = world(.nose)
+        let lAnkleW = world(.leftAnkle)
+        let rAnkleW = world(.rightAnkle)
 
+        let halfUpM    = max(simd_length(noseW - midHipW), 0.10) + 0.25   // hip→nose + head room
+        let lowestFootY = min(lAnkleW.y, rAnkleW.y)
+        let halfDownM  = max(abs(lowestFootY - midHipW.y), 0.30) + 0.15   // hip→foot + floor gap
+        let shHalfWidth = max(abs(world(.leftShoulder).x  - neckW.x),
+                              abs(world(.rightShoulder).x - neckW.x))
+        let halfRightM = shHalfWidth + 0.25                                // shoulder half + arm room
+
+        let center  = hipMidI
         let corners = [
-            centerI + h * (-rImg + uImg),   // TL
-            centerI + h * ( rImg + uImg),   // TR
-            centerI + h * ( rImg - uImg),   // BR
-            centerI + h * (-rImg - uImg),   // BL
+            center + (-halfRightM * rImg + halfUpM   * uImg),   // TL
+            center + ( halfRightM * rImg + halfUpM   * uImg),   // TR
+            center + ( halfRightM * rImg - halfDownM * uImg),   // BR
+            center + (-halfRightM * rImg - halfDownM * uImg),   // BL
         ]
         guard corners.allSatisfy(finite2) else { return .invalid }
 
-        // The box exists only while the user is upright (PinoQuest vanish-on-crouch).
-        let upright = LevelEstimator.uprightSanity(nose: solver(.nose), midHip: midHipS,
-                                                   leftAnkle: solver(.leftAnkle),
-                                                   rightAnkle: solver(.rightAnkle))
+        let upright = LevelEstimator.uprightSanity(nose: noseW, midHip: midHipW,
+                                                   leftAnkle: lAnkleW, rightAnkle: rAnkleW)
         return LeveledBox(corners: corners, valid: upright)
     }
 }

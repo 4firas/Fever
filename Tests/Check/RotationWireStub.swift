@@ -8,7 +8,7 @@ import FeverCore
 /// full production chain (lift → solve → rest-relative rebase → map → assemble),
 /// and asserting the PinoFBT rotation contract:
 ///
-///   • `/rotation` IS present for body slots 1-8 (rotation re-enabled),
+///   • `/rotation` IS present for ALL 8 body trackers (PinoFBT parity),
 ///   • NO `head/rotation` is ever emitted (head is position-only),
 ///   • euler values are BOUNDED (not pinned at ±180),
 ///   • NO (0,0,0) positions,
@@ -173,10 +173,12 @@ enum RotationWireStub {
             if !cond { ok = false }
         }
 
-        // (a) /rotation present for ALL 8 body slots.
+        // (a) /rotation present for ALL 8 body trackers (PinoFBT parity). The
+        //     per-bone rotation solver is fixed (spine-aligned chest, heel→toe feet
+        //     with roll locked), so every numbered tracker carries a real rotation.
         let expectBody = Set(["1", "2", "3", "4", "5", "6", "7", "8"])
         require(bodyRotSlots == expectBody,
-                "/rotation must be present for body slots 1-8: got \(bodyRotSlots.sorted())")
+                "/rotation must be present for all 8 body slots: got \(bodyRotSlots.sorted())")
         // (b) NO head/rotation.
         require(headRot.isEmpty, "head/rotation must NEVER be emitted (got \(headRot.count))")
         // (c) euler BOUNDED (not pinned at ±180) and finite.

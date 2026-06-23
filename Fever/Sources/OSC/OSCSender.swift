@@ -48,6 +48,15 @@ public actor OSCSender {
     /// limb rotation itself, which is the stable behavior for monocular tracking.
     private var rotationEnabled: Bool = false
 
+    /// Slots that carry `/rotation` when rotation is enabled: ALL 8 body trackers
+    /// (PinoFBT parity — it sends rotation for every numbered tracker).
+    ///
+    /// The per-bone rotation solver is now fixed (chest follows the spine, feet
+    /// follow heel→toe with roll locked — see `JointSolver`), so chest/feet produce
+    /// correct absolute orientations and knees/elbows carry their limb-bone
+    /// direction. Head remains position-only (sent separately, never rotation).
+    public static let rotationSlots: Set<String> = ["1", "2", "3", "4", "5", "6", "7", "8"]
+
     /// Per-slot LAST-VALID position, keyed by slot id ("1".."8", "head"). When a
     /// joint blips out of detection or the solver yields a degenerate value, the
     /// upstream pipeline can hand us (0,0,0)/NaN, which teleports that tracker to
@@ -143,7 +152,11 @@ public actor OSCSender {
             // rather than emit a (0,0,0) teleport.
             guard let held = resolveHeldPosition(tracker) else { continue }
             sendPosition(slot: tracker.slot, position: held, over: connection)
-            if rotationEnabled { sendRotation(tracker, over: connection) }
+            // Position-only for the extremities (knees/elbows): only hip/feet/chest
+            // carry rotation, so depth-fragile limb rotation never fights the IK.
+            if rotationEnabled, Self.rotationSlots.contains(tracker.slot) {
+                sendRotation(tracker, over: connection)
+            }
         }
     }
 
