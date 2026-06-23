@@ -35,8 +35,8 @@ public final class TwoEuroJointSmoother {
     private var lastRaw = [SIMD3<Float>](repeating: .zero, count: SMPLJoint.count)
     private var lastT: Double = -1
 
-    public init(body: TwoEuroParams = TwoEuroParams(),
-                legs: TwoEuroParams = TwoEuroParams(minCutoff: 1.6, beta: 0.6)) {
+    public init(body: TwoEuroParams = TwoEuroParams(minCutoff: 2.0, beta: 0.4),
+                legs: TwoEuroParams = TwoEuroParams(minCutoff: 2.5, beta: 0.6)) {
         self.body = body; self.legs = legs
     }
 

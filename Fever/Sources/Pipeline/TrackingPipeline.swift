@@ -299,12 +299,12 @@ private final class FrameProcessor: @unchecked Sendable {
     private func debugTap(_ solved: SolvedFrame, ht: Float, t: TimeInterval) {
         guard t - lastDebugWrite >= 0.33 else { return }
         lastDebugWrite = t
-        func f(_ v: SIMD3<Float>) -> String { String(format: "(%.2f,%.2f,%.2f)", v.x, v.y, v.z) }
-        let hip = solved.slotPositions[1] ?? .zero
-        let lfoot = solved.slotPositions[2] ?? .zero
-        let chest = solved.slotPositions[4] ?? .zero
-        let line = String(format: "ht=%.2f head=%@ hip=%@ hipEulerZXY=%@ Lfoot=%@ chest=%@\n",
-                          ht, f(solved.headPosition), f(hip), f(solved.hipEulerZXY), f(lfoot), f(chest))
+        func e(_ slot: Int) -> String {   // euler (pitch X, yaw Y, roll Z) degrees
+            let v = solved.slotEulers[slot] ?? .zero
+            return String(format: "(%.0f,%.0f,%.0f)", v.x, v.y, v.z)
+        }
+        let line = String(format: "ht=%.2f  HIProt=%@ CHESTrot=%@ Lkneerot=%@ Lfootrot=%@ Lelbowrot=%@\n",
+                          ht, e(1), e(4), e(5), e(2), e(7))
         if let h = FileHandle(forWritingAtPath: Self.debugPath) {
             h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close()
         }
