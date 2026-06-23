@@ -31,3 +31,7 @@ pi-session-recap.md
 .vrchat-fixes.js
 docs/
 Package.resources/
+*.onnx
+.coreml_cache/
+**/.venv/
+*.coreml
