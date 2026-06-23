@@ -53,6 +53,7 @@ public enum NLFProtocol {
         }
         let p3 = j3.map { SIMD3<Float>(Float($0[0]), Float($0[1]), Float($0[2])) }
         let p2 = j2.map { SIMD2<Float>(Float($0[0]), Float($0[1])) }
-        return SMPLPose(joints3D: p3, joints2D: p2, hasTracked: Float(r.ht), timestamp: timestamp)
+        return SMPLPose(joints3D: p3, joints2D: p2, hasTracked: Float(r.ht), timestamp: timestamp,
+                        width: r.w ?? 0, height: r.h ?? 0)
     }
 }

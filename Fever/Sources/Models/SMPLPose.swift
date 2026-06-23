@@ -9,16 +9,32 @@ import simd
 /// `CameraToWorldTransform`. `joints2D` are pixels in the fed frame (top-left origin).
 public struct SMPLPose: Sendable {
     public var joints3D: [SIMD3<Float>]   // count == SMPLJoint.count (24)
-    public var joints2D: [SIMD2<Float>]   // count == 24
+    public var joints2D: [SIMD2<Float>]   // count == 24, pixels in the fed frame
     public var hasTracked: Float          // detection/tracking confidence scalar
     public var timestamp: Double          // capture time (seconds, monotonic)
+    public var width: Int                 // fed-frame width  (for normalizing joints2D)
+    public var height: Int                // fed-frame height
 
     public init(joints3D: [SIMD3<Float>], joints2D: [SIMD2<Float>],
-                hasTracked: Float, timestamp: Double) {
+                hasTracked: Float, timestamp: Double, width: Int = 0, height: Int = 0) {
         self.joints3D = joints3D
         self.joints2D = joints2D
         self.hasTracked = hasTracked
         self.timestamp = timestamp
+        self.width = width
+        self.height = height
+    }
+
+    /// Screen-normalized 2D points (x,y in [0,1], top-left) for the preview overlay;
+    /// absent / not-tracked joints become NaN so the overlay skips them.
+    public func normalizedPoints() -> [SIMD2<Float>] {
+        guard width > 0, height > 0, isTracked else {
+            return Array(repeating: SIMD2<Float>(.nan, .nan), count: SMPLJoint.count)
+        }
+        return joints2D.map { p in
+            (p.x == 0 && p.y == 0) ? SIMD2<Float>(.nan, .nan)
+                                   : SIMD2<Float>(p.x / Float(width), p.y / Float(height))
+        }
     }
 
     public var isTracked: Bool { hasTracked > 0.5 }

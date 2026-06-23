@@ -17,7 +17,6 @@ public protocol NLFPoseSource: AnyObject {
 public final class NLFPoseLandmarker {
     private let service: NLFInferenceService
     private let targetHeight: Int
-    private let ci = CIContext(options: [.workingColorSpace: NSNull()])
     private var rgbBuffer = Data()
     private var rgbaScratch = [UInt8]()
 
@@ -44,28 +43,34 @@ public final class NLFPoseLandmarker {
         return await service.infer(rgb: rgb, width: w, height: h, timestamp: time)
     }
 
-    /// Downscale + convert to tightly-packed RGB888 (no row padding) via CoreImage.
+    /// Downscale a BGRA pixel buffer to tightly-packed, TOP-LEFT RGB888 via a CPU
+    /// CGContext draw (no Core Image / GPU render — frees the GPU for the model and
+    /// keeps orientation deterministic so joints2D land on the body).
     private func renderRGB(_ pb: CVPixelBuffer, width: Int, height: Int) -> Data? {
-        let src = CIImage(cvPixelBuffer: pb)
-        guard src.extent.width > 0, src.extent.height > 0 else { return nil }
-        let sx = CGFloat(width) / src.extent.width
-        let sy = CGFloat(height) / src.extent.height
-        let scaled = src.transformed(by: CGAffineTransform(scaleX: sx, y: sy))
-        let bytesPerRow = width * 4
-        if rgbaScratch.count != bytesPerRow * height {
-            rgbaScratch = [UInt8](repeating: 0, count: bytesPerRow * height)
-        }
-        if rgbBuffer.count != width * height * 3 {
-            rgbBuffer = Data(count: width * height * 3)
-        }
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pb) else { return nil }
+        let srcW = CVPixelBufferGetWidth(pb), srcH = CVPixelBufferGetHeight(pb)
+        let bpr = CVPixelBufferGetBytesPerRow(pb)
         let cs = CGColorSpaceCreateDeviceRGB()
+        let srcBI = CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        guard let srcCtx = CGContext(data: base, width: srcW, height: srcH, bitsPerComponent: 8,
+                                     bytesPerRow: bpr, space: cs, bitmapInfo: srcBI),
+              let cg = srcCtx.makeImage() else { return nil }
+
+        if rgbaScratch.count != width * height * 4 { rgbaScratch = [UInt8](repeating: 0, count: width * height * 4) }
+        if rgbBuffer.count != width * height * 3 { rgbBuffer = Data(count: width * height * 3) }
+        var ok = false
         rgbaScratch.withUnsafeMutableBytes { ptr in
-            ci.render(scaled, toBitmap: ptr.baseAddress!, rowBytes: bytesPerRow,
-                      bounds: CGRect(x: 0, y: 0, width: width, height: height),
-                      format: .RGBA8, colorSpace: cs)
+            guard let dst = CGContext(data: ptr.baseAddress, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: width * 4, space: cs,
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return }
+            dst.draw(cg, in: CGRect(x: 0, y: 0, width: width, height: height))   // row0 = top
+            ok = true
         }
-        rgbBuffer.withUnsafeMutableBytes { dst in
-            let d = dst.bindMemory(to: UInt8.self)
+        guard ok else { return nil }
+        rgbBuffer.withUnsafeMutableBytes { dstD in
+            let d = dstD.bindMemory(to: UInt8.self)
             rgbaScratch.withUnsafeBufferPointer { s in
                 for i in 0..<(width * height) {
                     d[i * 3]     = s[i * 4]

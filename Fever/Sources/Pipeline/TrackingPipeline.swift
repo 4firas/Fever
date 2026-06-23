@@ -122,8 +122,13 @@ public final class TrackingPipeline {
                     if let head { await s.sendHeadPosition(head) }
                 }
 
+                // preview at full rate; fps/telemetry throttled
+                let preview = frame.preview
                 let telemetry = frame.telemetry
-                await MainActor.run { telemetrySink.publishTelemetry(telemetry) }
+                await MainActor.run {
+                    telemetrySink.publishPreview(preview)
+                    telemetrySink.publishTelemetry(telemetry)
+                }
             }
         }
 
@@ -175,6 +180,11 @@ public final class TrackingPipeline {
         }
     }
 
+    private func publishPreview(_ points: [SIMD2<Float>]) {
+        guard isRunning else { return }
+        previewPoints = points
+    }
+
     private func publishTelemetry(_ t: Telemetry) {
         guard isRunning else { return }
         let now = ProcessInfo.processInfo.systemUptime
@@ -194,6 +204,7 @@ private struct Telemetry: Sendable {
 private struct AssembledFrame: Sendable {
     let body: [OSCTracker]
     let head: OSCTracker?
+    let preview: [SIMD2<Float>]
     let telemetry: Telemetry
 }
 
@@ -304,7 +315,7 @@ private final class FrameProcessor: @unchecked Sendable {
         let elapsed = now - windowStart
         if elapsed >= 1.0 { measuredFPS = Double(frameCount) / elapsed; frameCount = 0; windowStart = now }
 
-        return AssembledFrame(body: body, head: head,
+        return AssembledFrame(body: body, head: head, preview: pose.normalizedPoints(),
                               telemetry: Telemetry(fps: measuredFPS, droppedFrames: droppedFrames))
     }
 }
