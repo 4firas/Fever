@@ -68,19 +68,32 @@ public final class NLFSidecar: NLFInferenceService, @unchecked Sendable {
         p.arguments = [paths.script, paths.model]      // positional sys.argv[1] = model
         let inPipe = Pipe(); let outPipe = Pipe(); let errPipe = Pipe()
         p.standardInput = inPipe; p.standardOutput = outPipe; p.standardError = errPipe
-        do { try p.run() } catch { launchFailed = true; return false }
+        do { try p.run() } catch {
+            FileHandle.standardError.write(Data("[NLFSidecar] spawn FAILED for \(paths.python): \(error)\n".utf8))
+            launchFailed = true; return false
+        }
+        FileHandle.standardError.write(Data("[NLFSidecar] launched \(paths.script)\n".utf8))
 
         toChild = inPipe.fileHandleForWriting
         fromChild = outPipe.fileHandleForReading
-        // drain stderr (CoreML compile logs) so the child never blocks on a full pipe
-        errPipe.fileHandleForReading.readabilityHandler = { _ = $0.availableData }
+        // forward sidecar stderr (CoreML/onnxruntime logs + errors) so failures are visible
+        errPipe.fileHandleForReading.readabilityHandler = { h in
+            let d = h.availableData
+            if !d.isEmpty { FileHandle.standardError.write(Data("[sidecar] ".utf8) + d) }
+        }
 
         // gate on the sidecar's `{"ready":true}` stdout line (model + CoreML compile
         // can take a few seconds the first time, then it's cached)
         let deadline = Date().addingTimeInterval(60)
         while Date() < deadline {
-            guard let line = readLine() else { break }
-            if NLFProtocol.isReady(line) { process = p; return true }
+            guard let line = readLine() else {
+                FileHandle.standardError.write(Data("[NLFSidecar] EOF before ready (sidecar died on startup)\n".utf8))
+                break
+            }
+            if NLFProtocol.isReady(line) {
+                FileHandle.standardError.write(Data("[NLFSidecar] ready\n".utf8))
+                process = p; return true
+            }
         }
         p.terminate(); launchFailed = true
         toChild = nil; fromChild = nil; lineBuf.removeAll()
