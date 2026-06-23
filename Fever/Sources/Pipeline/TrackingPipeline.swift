@@ -324,7 +324,7 @@ private final class FrameProcessor: @unchecked Sendable {
         body.reserveCapacity(TrackerMapA.slots.count)
         for slot in TrackerMapA.slots {
             let pos = solved.slotPositions[slot.index] ?? .zero
-            let euler = slot.sendsRotation ? solved.hipEulerZXY : .zero
+            let euler = solved.slotEulers[slot.index] ?? .zero
             body.append(OSCTracker(slot: slot.path, position: pos, eulerDegrees: euler))
         }
         let head = OSCTracker(slot: "head", position: solved.headPosition, eulerDegrees: .zero)

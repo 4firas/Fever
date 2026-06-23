@@ -48,11 +48,11 @@ public actor OSCSender {
     /// limb rotation itself, which is the stable behavior for monocular tracking.
     private var rotationEnabled: Bool = false
 
-    /// Slots that carry `/rotation`: the HIP (root, slot 1) ONLY — wire-confirmed
-    /// PinoFBT behavior (findings §7). Every other tracker is position-only; VRChat
-    /// derives limb orientation from the position constellation. Head never sends
-    /// rotation (it streams position only, as the re-origin anchor).
-    public static let rotationSlots: Set<String> = ["1"]
+    /// Slots that carry `/rotation`: all 8 body trackers (hip + chest + feet + knees
+    /// + elbows). Desktop PinoFBT 2.0 solves full-limb rotation (calc_chest/arm/knee/
+    /// ankle_rotation), so we send it for every numbered tracker. Head stays
+    /// position-only (it's the re-origin anchor).
+    public static let rotationSlots: Set<String> = ["1", "2", "3", "4", "5", "6", "7", "8"]
 
     /// Per-slot LAST-VALID position, keyed by slot id ("1".."8", "head"). When a
     /// joint blips out of detection or the solver yields a degenerate value, the
