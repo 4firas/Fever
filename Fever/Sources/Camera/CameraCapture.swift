@@ -36,6 +36,9 @@ public enum CameraAuthorization: Sendable, Equatable {
 /// replacement keep at most one buffer alive outside the pool at a time.
 public final class CameraCapture: NSObject, FrameSource {
 
+    /// Capture frame rate, pinned to the NLF inference ceiling so preview == inference.
+    public static let captureFPS: CMTimeScale = 15
+
     /// The underlying session. Exposed so a SwiftUI `AVCaptureVideoPreviewLayer`
     /// can attach to it for the full-bleed live preview, per the shared contract.
     public var session: AVCaptureSession { _session }
@@ -249,13 +252,14 @@ public final class CameraCapture: NSObject, FrameSource {
         // the format manually breaks frame delivery on this SDK); we only pin the
         // frame duration, so frame delivery is unchanged and there's no accuracy
         // cost.
+        // Pin the camera to the inference rate so the preview, the data output, and
+        // the model all run at the SAME fps: every captured frame gets inferred and
+        // the skeleton sits on exactly the frame shown (no 30 fps video with a 15 fps
+        // skeleton floating on top). The NLF model sustains ~15 fps on this machine.
         if (try? device.lockForConfiguration()) != nil {
-            if device.activeFormat.videoSupportedFrameRateRanges
-                .contains(where: { $0.maxFrameRate >= 30 }) {
-                let thirty = CMTime(value: 1, timescale: 30)
-                device.activeVideoMinFrameDuration = thirty
-                device.activeVideoMaxFrameDuration = thirty
-            }
+            let target = CMTime(value: 1, timescale: CameraCapture.captureFPS)
+            device.activeVideoMinFrameDuration = target
+            device.activeVideoMaxFrameDuration = target
             device.unlockForConfiguration()
         }
 

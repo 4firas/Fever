@@ -209,11 +209,11 @@ public final class TrackingConfig {
         // FABRICATED head (derived from shoulder/ear geometry) creates a SECOND head that
         // fights the HMD, causing VRChat to fold the neck to reconcile the conflict
         // (the 90° neck-fold bug). TrackingPipeline.swift:360-365 already documents
-        // the correct design: "We deliberately send NO head OSC point — ever. The user
-        // wears a Quest HMD, which is the authoritative head."
-        // Toggle ON only for room-scale PC setups WITHOUT an HMD where the head anchor
-        // is needed to origin the OSC space.
-        sendHeadReference = d.object(forKey: Keys.sendHeadReference) as? Bool ?? false
+        // PinoFBT streams /tracking/trackers/head/position continuously (wire-confirmed,
+        // findings §7) — it's the anchor VRChat re-origins the whole tracker space to.
+        // The NLF model emits ABSOLUTE camera-space positions, so WITHOUT this anchor the
+        // body lands metres off ("far away"). Force-enable (override any stale false pref).
+        sendHeadReference = true
         // DEFAULT false — VERIFIED by live OSC capture diff against PinoFBT.
         // KEY FINDING: the MediaPipe Tasks API (what Fever uses) emits world-landmark
         // X with the OPPOSITE sign to the legacy GPU graph PinoFBT uses. PinoFBT
