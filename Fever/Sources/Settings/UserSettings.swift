@@ -23,6 +23,10 @@ public final class TrackingConfig {
     public var oscHost: String {
         didSet { UserDefaults.standard.set(oscHost, forKey: Keys.oscHost) }
     }
+    /// Selected camera `uniqueID` ("" = auto: prefer an external camera).
+    public var cameraDeviceID: String {
+        didSet { UserDefaults.standard.set(cameraDeviceID, forKey: Keys.cameraDeviceID) }
+    }
     public var oscPort: Int {
         didSet {
             // Clamp to the valid UDP port range so the GUI port field (which
@@ -203,6 +207,7 @@ public final class TrackingConfig {
         let d = UserDefaults.standard
 
         oscHost = (d.string(forKey: Keys.oscHost)) ?? "127.0.0.1"
+        cameraDeviceID = d.string(forKey: Keys.cameraDeviceID) ?? ""
         oscPort = d.object(forKey: Keys.oscPort) as? Int ?? 9000
         enableTracker = d.object(forKey: Keys.enableTracker) as? Bool ?? false
         // DEFAULT false — An HMD user (Quest) already has an authoritative head; Fever's
@@ -298,6 +303,7 @@ public final class TrackingConfig {
     // MARK: - Persistence keys
     private enum Keys {
         static let oscHost = "oscHost"
+        static let cameraDeviceID = "cameraDeviceID"
         static let oscPort = "oscPort"
         static let sendRotation = "sendRotation"
         static let rotationRestRelative = "rotationRestRelative"

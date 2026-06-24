@@ -44,6 +44,7 @@ struct FeverApp: App {
                                         landmarker: makeLiveNLFLandmarker())
         _pipeline = State(initialValue: pipeline)
         self.camera = camera
+        camera.preferredDeviceID = config.cameraDeviceID.isEmpty ? nil : config.cameraDeviceID
     }
 
     var body: some Scene {
@@ -66,7 +67,7 @@ struct FeverApp: App {
         }
 
         Settings {
-            SettingsView(config: config)
+            SettingsView(config: config, camera: camera)
         }
     }
 }
@@ -76,6 +77,7 @@ struct FeverApp: App {
 /// body tweak sliders, and the head-reference toggle.
 struct SettingsView: View {
     @Bindable var config: TrackingConfig
+    let camera: CameraCapture
 
     var body: some View {
         TabView {
@@ -106,6 +108,19 @@ struct SettingsView: View {
                     get: { String(config.oscPort) },
                     set: { if let p = Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) { config.oscPort = p } }))
                 Text("VRChat receives OSC on UDP 9000 by default. The Quest's IP changes on reconnect — set a DHCP reservation to keep it fixed.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+            Section("Camera") {
+                Picker("Camera", selection: Binding(
+                    get: { config.cameraDeviceID },
+                    set: { config.cameraDeviceID = $0; camera.selectCamera($0.isEmpty ? nil : $0) })) {
+                    Text("Auto (prefer external)").tag("")
+                    ForEach(CameraCapture.availableCameras(), id: \.uniqueID) { cam in
+                        Text(cam.localizedName).tag(cam.uniqueID)
+                    }
+                }
+                Text("Pick your GoPro/USB webcam. Takes effect immediately; Auto prefers an external camera over the built-in.")
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
             }

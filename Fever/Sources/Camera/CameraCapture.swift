@@ -53,6 +53,29 @@ public final class CameraCapture: NSObject, FrameSource {
 
     private let videoOutput = AVCaptureVideoDataOutput()
 
+    /// Preferred camera `uniqueID` (e.g. a GoPro/USB webcam chosen in Settings).
+    /// nil → auto-pick: prefer an external camera over the built-in. Set before start.
+    public var preferredDeviceID: String?
+
+    /// All connected video cameras (built-in + external/USB/Continuity), for the
+    /// Settings camera picker.
+    public static func availableCameras() -> [AVCaptureDevice] {
+        var types: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera]
+        types.append(.external)
+        types.append(.continuityCamera)
+        return AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video,
+                                                position: .unspecified).devices
+    }
+
+    /// Choose the capture device: the explicitly-preferred one if connected, else
+    /// the first external camera (GoPro/USB), else the system default.
+    private func pickDevice() -> AVCaptureDevice? {
+        let cams = Self.availableCameras()
+        if let id = preferredDeviceID, let d = cams.first(where: { $0.uniqueID == id }) { return d }
+        if let ext = cams.first(where: { $0.deviceType == .external }) { return ext }
+        return AVCaptureDevice.default(for: .video) ?? cams.first
+    }
+
     /// Legacy frame sink (FrameSource protocol). Retained for compatibility; in
     /// the live path the inference worker pulls frames from the mailbox via
     /// `nextFrame()` instead, so this is normally left `nil`.
@@ -235,9 +258,8 @@ public final class CameraCapture: NSObject, FrameSource {
         _session.beginConfiguration()
         _session.sessionPreset = .hd1280x720   // 720p: ample for body pose, fast.
 
-        // Built-in / front camera. Default video device, NOT a back-position
-        // lookup (which is nil on a Mac).
-        guard let device = AVCaptureDevice.default(for: .video),
+        // Preferred external camera (GoPro/USB) if present, else built-in default.
+        guard let device = pickDevice(),
               let input = try? AVCaptureDeviceInput(device: device),
               _session.canAddInput(input) else {
             _session.commitConfiguration()
@@ -256,12 +278,7 @@ public final class CameraCapture: NSObject, FrameSource {
         // the model all run at the SAME fps: every captured frame gets inferred and
         // the skeleton sits on exactly the frame shown (no 30 fps video with a 15 fps
         // skeleton floating on top). The NLF model sustains ~15 fps on this machine.
-        if (try? device.lockForConfiguration()) != nil {
-            let target = CMTime(value: 1, timescale: CameraCapture.captureFPS)
-            device.activeVideoMinFrameDuration = target
-            device.activeVideoMaxFrameDuration = target
-            device.unlockForConfiguration()
-        }
+        applyFrameRate(to: device)
 
         videoOutput.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
@@ -277,6 +294,36 @@ public final class CameraCapture: NSObject, FrameSource {
 
         _session.commitConfiguration()
         lock.withLock { isConfigured = true }
+    }
+
+    /// Lock the capture device to the steady inference frame rate.
+    private func applyFrameRate(to device: AVCaptureDevice) {
+        if (try? device.lockForConfiguration()) != nil {
+            let target = CMTime(value: 1, timescale: CameraCapture.captureFPS)
+            device.activeVideoMinFrameDuration = target
+            device.activeVideoMaxFrameDuration = target
+            device.unlockForConfiguration()
+        }
+    }
+
+    /// Switch the active camera live (Settings picker). Swaps the session's video
+    /// input on the session queue; if not yet configured, just records the choice
+    /// so the next `start()` uses it.
+    public func selectCamera(_ deviceID: String?) {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.preferredDeviceID = deviceID
+            guard self.lock.withLock({ self.isConfigured }) else { return }
+            self._session.beginConfiguration()
+            for input in self._session.inputs { self._session.removeInput(input) }
+            if let device = self.pickDevice(),
+               let input = try? AVCaptureDeviceInput(device: device),
+               self._session.canAddInput(input) {
+                self._session.addInput(input)
+                self.applyFrameRate(to: device)
+            }
+            self._session.commitConfiguration()
+        }
     }
 }
 
