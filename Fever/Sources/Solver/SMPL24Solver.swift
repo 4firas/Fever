@@ -79,9 +79,9 @@ public final class SMPL24Solver {
         for (slot, qraw) in raws {
             eulers[slot] = quaternionToEulerZXYDegrees(qraw)
         }
-        // Pitch comes out inverted in Fever's space vs PinoFBT (bow → −pitch instead
-        // of +); negate the hip pitch so a forward bow reads as PinoFBT does.
-        if var he = eulers[1] { he.x = -he.x; eulers[1] = he }
+        // Fever's space inverts hip pitch (bow read as −) AND yaw (live test: avatar
+        // turned opposite the user). Negate both; roll matched as-is.
+        if var he = eulers[1] { he.x = -he.x; he.y = -he.y; eulers[1] = he }
 
         // Hip tracker sits at the SMPL root (≈ groin); raise it toward the lower
         // spine so VRChat places the hip bone at the waist (user: "too low").
