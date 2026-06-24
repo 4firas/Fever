@@ -84,9 +84,11 @@ public final class SMPL24Solver {
         if var he = eulers[1] { he.x = -he.x; eulers[1] = he }
         if var ce = eulers[4] { ce.x = -ce.x; eulers[4] = ce }
 
-        // Hip tracker sits at the SMPL root (≈ groin); raise it toward the lower
-        // spine so VRChat places the hip bone at the waist (user: "too low").
-        positions[1] = j(.pelvis) + (j(.spine1) - j(.pelvis)) * 0.5
+        // Hip tracker sits at the SMPL root (≈ groin); raise its HEIGHT toward the
+        // lower spine (waist) but keep full pelvis X/Z so lateral hip sway isn't damped.
+        var hipPos = j(.pelvis)
+        hipPos.y += (j(.spine1).y - j(.pelvis).y) * 0.5
+        positions[1] = hipPos
 
         let head: SIMD3<Float>
         switch headAnchor {
