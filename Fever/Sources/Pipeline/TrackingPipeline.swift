@@ -303,8 +303,13 @@ private final class FrameProcessor: @unchecked Sendable {
             let v = solved.slotEulers[slot] ?? .zero
             return String(format: "(%.0f,%.0f,%.0f)", v.x, v.y, v.z)
         }
-        let line = String(format: "ht=%.2f  HIProt=%@ CHESTrot=%@ Lkneerot=%@ Lfootrot=%@ Lelbowrot=%@\n",
-                          ht, e(1), e(4), e(5), e(2), e(7))
+        func p(_ slot: Int) -> String {   // position (x,y,z) meters
+            let v = solved.slotPositions[slot] ?? .zero
+            return String(format: "(%.2f,%.2f,%.2f)", v.x, v.y, v.z)
+        }
+        // Mirror PinoFBT's capture columns for a direct diff: hip rot + hip pos.
+        let line = String(format: "ht=%.2f  HIProt=%@  HIPpos=%@  CHESTrot=%@\n",
+                          ht, e(1), p(1), e(4))
         if let h = FileHandle(forWritingAtPath: Self.debugPath) {
             h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close()
         }
