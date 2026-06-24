@@ -93,7 +93,11 @@ public final class SMPL24Solver {
             if slot.index == 1 || slot.index == 4 {
                 let p = spineForward(slot.index)
                 let n = simd_length(p)
-                let singular = n < 1e-6 || simd_dot(p / n, fwd) < -0.95
+                // Freeze only the true singular cone: forward within ~11° of antiparallel
+                // (facing dead-behind). Simulation showed calc_root is clean until ~±10°
+                // of 180°, so −0.98 (≈168°) is the tightest band that still catches the
+                // blow-up — a small cone directly behind, instead of a wide dead-zone.
+                let singular = n < 1e-6 || simd_dot(p / n, fwd) < -0.98
                 if singular, let last = holds[slot.index] {
                     q = last
                 } else {
