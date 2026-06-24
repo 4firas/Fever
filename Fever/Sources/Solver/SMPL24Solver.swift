@@ -84,6 +84,18 @@ public final class SMPL24Solver {
         if var he = eulers[1] { he.x = -he.x; eulers[1] = he }
         if var ce = eulers[4] { ce.x = -ce.x; eulers[4] = ce }
 
+        // Amplify the hip's rotation RELATIVE to the chest = pelvic articulation
+        // (tilt/twist of the hips vs the torso). A whole-body turn moves hip+chest
+        // together so their difference ≈ 0 → turns stay 1:1 (no over-rotation); only
+        // isolated pelvic pitch/yaw/roll is boosted — the "hips don't pitch/yaw"
+        // complaint. The hip rotation IS live (log: yaw→55° on a turn) but the
+        // pelvis-vs-torso part is too subtle to read without this gain.
+        if let chest = eulers[4], var hip = eulers[1] {
+            let hipArticGain: Float = 2.0
+            hip = chest + (hip - chest) * hipArticGain
+            eulers[1] = hip
+        }
+
         // Hip tracker sits at the SMPL root (≈ groin); raise its HEIGHT toward the
         // lower spine (waist) but keep full pelvis X/Z so lateral hip sway isn't damped.
         var hipPos = j(.pelvis)
@@ -95,19 +107,6 @@ public final class SMPL24Solver {
         case .head15:           head = j(.head)
         case .neck12:           head = j(.neck)
         case .headNeckMidpoint: head = (j(.head) + j(.neck)) * 0.5
-        }
-
-        // Amplify lateral hip sway relative to the head anchor. The raw hip-vs-head
-        // offset from real hip movement is small (log: ≤~0.08 m), and VRChat's leg-IK
-        // pelvis shift on a knee raise dwarfs it — so the hips read as static while
-        // everything else moves. Scaling the horizontal offset (PinoFBT's
-        // hipExaggerate) makes natural hip sway/wiggle actually show. Y (height) and
-        // rotation are untouched, so turns/bows keep their exact magnitude.
-        if var hp = positions[1] {
-            let swayGain: Float = 1.9
-            hp.x = head.x + (hp.x - head.x) * swayGain
-            hp.z = head.z + (hp.z - head.z) * swayGain
-            positions[1] = hp
         }
 
         return SolvedFrame(slotPositions: positions, slotEulers: eulers,
