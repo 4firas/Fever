@@ -48,11 +48,11 @@ public actor OSCSender {
     /// limb rotation itself, which is the stable behavior for monocular tracking.
     private var rotationEnabled: Bool = false
 
-    /// Slots that carry `/rotation`: hip + feet + knees + elbows. The CHEST (slot 4)
-    /// is excluded — wire-confirmed PinoFBT does NOT send chest rotation (capture
-    /// 2026-06-24: /tracking/trackers/4/rotation never present); the chest rides
-    /// VRChat's IK off positions. Feet/knees/elbows DO rotate (restored — they
-    /// tracked well). Head is position-only (the re-origin anchor).
+    /// Slots that carry `/rotation`: hip + feet + chest + knees. The CHEST (slot 4)
+    /// IS included — position-only made it static in VRChat while PinoFBT's chest moves
+    /// perfectly, so PinoFBT must send chest rotation (the earlier "chest = position
+    /// only" capture had the chest tracker off). Chest uses the exact calc_chest.
+    /// Elbows are dropped (monocular arm tracking floats). Head = position-only anchor.
     public static let rotationSlots: Set<String> = ["1", "2", "3", "4", "5", "6"]
 
     /// Per-slot LAST-VALID position, keyed by slot id ("1".."8", "head"). When a
