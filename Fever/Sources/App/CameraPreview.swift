@@ -110,11 +110,12 @@ private struct PreviewLayerView: NSViewRepresentable {
                                              blue: 0x15 / 255.0,
                                              alpha: 1).cgColor
 
-            // Inferred-frame layer: aspect-fit + horizontally mirrored to overlay the
-            // live preview exactly; contents animation disabled so frames swap crisply.
+            // Inferred-frame layer: aspect-fit, overlaying the live preview exactly.
+            // The horizontal mirror is set in attach() to MATCH the live layer's actual
+            // mirror state (built-in cam mirrors; external/GoPro does not) so the
+            // skeleton stays aligned. Contents animation disabled so frames swap crisply.
             let inf = CALayer()
             inf.contentsGravity = .resizeAspect
-            inf.transform = CATransform3DMakeScale(-1, 1, 1)
             inf.actions = ["contents": NSNull()]
             inf.frame = bounds
             layer?.addSublayer(inf)
@@ -144,6 +145,14 @@ private struct PreviewLayerView: NSViewRepresentable {
                 connection.automaticallyAdjustsVideoMirroring = false
                 connection.isVideoMirrored = true
             }
+
+            // Match the inferred-frame layer's mirror to the live layer's EFFECTIVE
+            // mirror (true for the built-in webcam, false for an external/GoPro that
+            // doesn't support mirroring) so the inferred frame and the skeleton overlay
+            // stay aligned regardless of which camera is selected.
+            let mirrored = preview.connection?.isVideoMirrored ?? false
+            inferredLayer?.transform = mirrored ? CATransform3DMakeScale(-1, 1, 1)
+                                                 : CATransform3DIdentity
 
             // Below the inferred-frame layer so, while running, the inferred frame
             // (inference rate) covers the live feed; when stopped the live feed shows.
