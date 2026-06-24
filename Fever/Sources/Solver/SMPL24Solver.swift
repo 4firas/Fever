@@ -91,8 +91,10 @@ public final class SMPL24Solver {
         // complaint. The hip rotation IS live (log: yaw→55° on a turn) but the
         // pelvis-vs-torso part is too subtle to read without this gain.
         if let chest = eulers[4], var hip = eulers[1] {
-            let hipArticGain: Float = 2.0
-            hip = chest + (hip - chest) * hipArticGain
+            let hipArticGain: Float = 1.5
+            var rel = hip - chest                 // pelvis orientation relative to torso
+            rel.z = -rel.z                         // side-tilt (roll) was mirrored: tilt CW → hips went CCW
+            hip = chest + rel * hipArticGain
             eulers[1] = hip
         }
 
