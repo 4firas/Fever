@@ -83,8 +83,6 @@ struct SettingsView: View {
                 .tabItem { Label("OSC", systemImage: "network") }
             trackersTab
                 .tabItem { Label("Trackers", systemImage: "figure.walk") }
-            smoothingTab
-                .tabItem { Label("Tuning", systemImage: "slider.horizontal.3") }
         }
         .frame(width: 460, height: 460)
         .tint(Theme.crimsonBright)
@@ -139,12 +137,6 @@ struct SettingsView: View {
                 Text("Streams /rotation for all body trackers (hip, chest, feet, knees, elbows) — PinoFBT parity. The per-bone solver is fixed: chest follows the spine, feet follow heel→toe with roll locked. The head is always position-only.")
                     .foregroundStyle(Theme.textSecondary)
             }
-            Section {
-                Toggle("Yaw stabilizer (Body Stabilizer)", isOn: $config.yawStabilizer)
-            } footer: {
-                Text("PinoFBT-style: derives one smoothed body-facing yaw and imposes it on the torso (hip + chest) so the body turns as a stable unit — less yaw jitter/flip when you face away. Opt-in; enable and test in-headset.")
-                    .foregroundStyle(Theme.textSecondary)
-            }
         }
         .formStyle(.grouped)
     }
@@ -177,42 +169,6 @@ struct SettingsView: View {
         .formStyle(.grouped)
     }
 
-    // MARK: Smoothing / body tweaks
-
-    private var smoothingTab: some View {
-        Form {
-            Section("One-Euro Filter") {
-                slider("Min cutoff", $config.stabilizerMinCutoff, 0.1...5, "%.2f")
-                slider("Beta", $config.stabilizerBeta, 0...0.1, "%.3f")
-                slider("Rotation smoothing", $config.rotationSmoothing, 0...1, "%.2f")
-            }
-            Section("Body Tweaks") {
-                slider("Joint size", $config.jointSize, 0.1...3, "%.2f")
-                slider("Hip sway", $config.hipExaggerateCoefficient, 1...3, "%.2f")
-                slider("Hip lean", $config.hipTwistCoefficient, 1...2, "%.2f")
-                slider("Hip length", $config.hipLength, -0.3...0.3, "%.2f")
-                slider("Knee position", $config.kneePosition, -0.3...0.3, "%.2f")
-            }
-        }
-        .formStyle(.grouped)
-    }
-
-    private func slider(_ title: String,
-                        _ value: Binding<Double>,
-                        _ range: ClosedRange<Double>,
-                        _ fmt: String) -> some View {
-        LabeledContent {
-            VStack(alignment: .trailing, spacing: 2) {
-                Slider(value: value, in: range)
-                    .frame(width: 200)
-                Text(String(format: fmt, value.wrappedValue))
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(Theme.textSecondary)
-            }
-        } label: {
-            Text(title)
-        }
-    }
 
     private func binding(for joint: JointType) -> Binding<Bool> {
         Binding(

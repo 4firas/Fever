@@ -33,11 +33,6 @@ struct ContentView: View {
         get { _inspectorPresented.wrappedValue }
         nonmutating set { _inspectorPresented.wrappedValue = newValue }
     }
-    private var _calibrationPresented = State(initialValue: false)
-    private var calibrationPresented: Bool {
-        get { _calibrationPresented.wrappedValue }
-        nonmutating set { _calibrationPresented.wrappedValue = newValue }
-    }
 
     var body: some View {
         NavigationSplitView {
@@ -71,9 +66,6 @@ struct ContentView: View {
                         // tracker cards' monospaced position/rotation rows.
                         .inspectorColumnWidth(min: 260, ideal: 320, max: 420)
                 }
-        }
-        .sheet(isPresented: _calibrationPresented.projectedValue) {
-            CalibrationSheet(pipeline: pipeline)
         }
     }
 
@@ -125,8 +117,7 @@ struct ContentView: View {
                     // The single tidy control bar, bottom-center. Allowed to
                     // shrink within the available width rather than clip.
                     ControlBar(config: config,
-                               pipeline: pipeline,
-                               onCalibrate: { calibrationPresented = true })
+                               pipeline: pipeline)
                         .frame(maxWidth: geo.size.width)
                         .padding(.bottom, 22)
                 }
@@ -146,7 +137,6 @@ struct ContentView: View {
 private struct ControlBar: View {
     @Bindable var config: TrackingConfig
     let pipeline: TrackingPipeline
-    let onCalibrate: () -> Void
 
     var body: some View {
         GlassEffectContainer(spacing: 14) {
@@ -167,11 +157,10 @@ private struct ControlBar: View {
                 .padding(.horizontal, 6)
             }
         }
-        // Apply leveling/Body-Stabilizer changes to the running backend immediately.
-        .onChange(of: config.bodyStabilizer) { pipeline.applyLevelingConfig() }
-        .onChange(of: config.levelIncludeRoll) { pipeline.applyLevelingConfig() }
     }
 
+    // PinoFBT has no in-app Recenter or Body Stabilizer: rotations are absolute and
+    // VRChat's own T-pose calibration handles alignment. Just Start/Stop here.
     @ViewBuilder private var buttons: some View {
         Button {
             toggleTracking()
@@ -183,29 +172,6 @@ private struct ControlBar: View {
         }
         .buttonStyle(.glassProminent)
         .tint(pipeline.isRunning ? Theme.crimsonBright : Theme.crimson)
-
-        Button {
-            onCalibrate()
-        } label: {
-            Label("Recenter", systemImage: "scope")
-                .font(.system(size: 13, weight: .medium))
-        }
-        .buttonStyle(.glass)
-        .tint(Theme.dustyRose)
-        .disabled(!pipeline.isRunning)
-
-        // Body Stabilizer — PinoQuest-style continuous gravity re-leveling. Tints
-        // green when active. Baseline leveling (datum from Recenter) is always on;
-        // this adds continuous re-leveling that tracks slow camera/posture drift.
-        Button {
-            config.bodyStabilizer.toggle()
-        } label: {
-            Label("Body Stabilizer", systemImage: "gyroscope")
-                .font(.system(size: 13, weight: .medium))
-        }
-        .buttonStyle(.glass)
-        .tint(config.bodyStabilizer ? Theme.good : Theme.textMuted)
-        .help("Body Stabilizer — continuously re-levels tracking so it stays correct regardless of camera angle.")
     }
 
     // Compact live readout on a single backing capsule so the small monospaced

@@ -289,7 +289,7 @@ private final class FrameProcessor: @unchecked Sendable {
         lock.withLock {
             transform = CameraToWorldTransform(mirrorX: config.mirrorTracking, heightScale: 1)
             smoother = TwoEuroJointSmoother()
-            solver.reset(); solver.requestRestCapture()
+            solver.reset()
             frameCount = 0; windowStart = 0; measuredFPS = 0
         }
         try? "fever osc debug log\n".write(toFile: Self.debugPath, atomically: false, encoding: .utf8)
@@ -311,7 +311,7 @@ private final class FrameProcessor: @unchecked Sendable {
     }
 
     func reset() { lock.withLock { smoother.reset(); solver.reset(); measuredFPS = 0; frameCount = 0; windowStart = 0 } }
-    func recenter() { lock.withLock { smoother.reset(); solver.reset(); solver.requestRestCapture() } }
+    func recenter() { lock.withLock { smoother.reset(); solver.reset() } }
 
     func process(_ pose: SMPLPose, droppedFrames: Int) -> AssembledFrame {
         lock.lock(); defer { lock.unlock() }
