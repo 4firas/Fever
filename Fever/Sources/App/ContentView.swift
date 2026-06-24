@@ -85,7 +85,8 @@ struct ContentView: View {
             // same bounds, so the skeleton lands on the body. The preview shows a
             // clear placeholder (not a black void) when there is no live feed.
             CameraPreview(session: pipeline.previewSession,
-                          authorized: pipeline.cameraAuthorized)
+                          authorized: pipeline.cameraAuthorized,
+                          inferredFrame: pipeline.previewImage)
                 .overlay {
                     SkeletonOverlay(points: pipeline.previewPoints, box: pipeline.leveledBox)
                 }

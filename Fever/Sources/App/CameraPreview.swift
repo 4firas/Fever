@@ -31,6 +31,10 @@ struct CameraPreview: View {
     /// Whether the OS has granted camera access. Drives the placeholder copy
     /// between "grant access" and "starting up".
     let authorized: Bool
+    /// The frame inference last ran on. When non-nil (running) it's drawn over the
+    /// live layer, so the visible preview advances at the inference rate — preview
+    /// fps == inference fps. nil (stopped) falls through to the live camera layer.
+    var inferredFrame: CGImage? = nil
 
     var body: some View {
         ZStack {
@@ -40,7 +44,7 @@ struct CameraPreview: View {
             Theme.background
 
             if let session {
-                PreviewLayerView(session: session)
+                PreviewLayerView(session: session, inferredFrame: inferredFrame)
             } else {
                 placeholder
             }
@@ -72,15 +76,18 @@ struct CameraPreview: View {
 private struct PreviewLayerView: NSViewRepresentable {
 
     let session: AVCaptureSession
+    let inferredFrame: CGImage?
 
     func makeNSView(context: Context) -> PreviewNSView {
         let view = PreviewNSView()
         view.attach(session: session)
+        view.setInferredFrame(inferredFrame)
         return view
     }
 
     func updateNSView(_ nsView: PreviewNSView, context: Context) {
         nsView.attach(session: session)
+        nsView.setInferredFrame(inferredFrame)
     }
 
     /// Layer-backed `NSView` that owns an `AVCaptureVideoPreviewLayer` sublayer
@@ -88,6 +95,10 @@ private struct PreviewLayerView: NSViewRepresentable {
     final class PreviewNSView: NSView {
 
         private var previewLayer: AVCaptureVideoPreviewLayer?
+        /// Drawn ABOVE the live layer; holds the exact inferred frame so the visible
+        /// preview only advances when inference does. Mirrored + aspect-fit to match
+        /// the live layer exactly so the skeleton overlay still lines up.
+        private var inferredLayer: CALayer?
 
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
@@ -98,6 +109,16 @@ private struct PreviewLayerView: NSViewRepresentable {
                                              green: 0x15 / 255.0,
                                              blue: 0x15 / 255.0,
                                              alpha: 1).cgColor
+
+            // Inferred-frame layer: aspect-fit + horizontally mirrored to overlay the
+            // live preview exactly; contents animation disabled so frames swap crisply.
+            let inf = CALayer()
+            inf.contentsGravity = .resizeAspect
+            inf.transform = CATransform3DMakeScale(-1, 1, 1)
+            inf.actions = ["contents": NSNull()]
+            inf.frame = bounds
+            layer?.addSublayer(inf)
+            inferredLayer = inf
         }
 
         @available(*, unavailable)
@@ -124,13 +145,21 @@ private struct PreviewLayerView: NSViewRepresentable {
                 connection.isVideoMirrored = true
             }
 
-            layer?.addSublayer(preview)
+            // Below the inferred-frame layer so, while running, the inferred frame
+            // (inference rate) covers the live feed; when stopped the live feed shows.
+            layer?.insertSublayer(preview, at: 0)
             previewLayer = preview
+        }
+
+        /// Swap in the latest inferred frame (nil = show the live layer underneath).
+        func setInferredFrame(_ image: CGImage?) {
+            inferredLayer?.contents = image
         }
 
         override func layout() {
             super.layout()
             previewLayer?.frame = bounds
+            inferredLayer?.frame = bounds
         }
     }
 }

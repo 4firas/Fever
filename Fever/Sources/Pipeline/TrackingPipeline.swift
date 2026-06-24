@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreImage
 import CoreVideo
 import Foundation
 import Observation
@@ -24,6 +25,9 @@ public final class TrackingPipeline {
     public private(set) var fps: Double = 0
     public private(set) var lastFrameJoints: [VRJoint] = []      // retained surface (unused in NLF path)
     public private(set) var previewPoints: [SIMD2<Float>] = []
+    /// The exact frame inference last ran on (published with previewPoints) so the
+    /// on-screen preview updates at the inference rate, not the faster camera rate.
+    public private(set) var previewImage: CGImage?
     public private(set) var leveledBox: LeveledBox = .invalid    // retained surface; always invalid (no leveling)
     public private(set) var droppedFrames = 0
     public private(set) var previewSession: AVCaptureSession?
@@ -103,6 +107,7 @@ public final class TrackingPipeline {
         let telemetrySink = self
 
         worker = Task.detached(priority: .userInitiated) {
+            let ciContext = CIContext(options: [.useSoftwareRenderer: false])
             while !Task.isCancelled {
                 if runtime.takeRebaselineRequest() { processor.recenter() }
 
@@ -122,11 +127,15 @@ public final class TrackingPipeline {
                     if let head { await s.sendHeadPosition(head) }
                 }
 
-                // preview at full rate; fps/telemetry throttled
+                // Render the EXACT frame inference ran on, so the preview advances at
+                // the inference rate (preview fps == inference fps) and the skeleton
+                // sits on the frame it was computed from — no faster live-feed drift.
                 let preview = frame.preview
                 let telemetry = frame.telemetry
+                let ci = CIImage(cvImageBuffer: pixelBuffer)
+                let cgImage = ciContext.createCGImage(ci, from: ci.extent)
                 await MainActor.run {
-                    telemetrySink.publishPreview(preview)
+                    telemetrySink.publishPreview(preview, image: cgImage)
                     telemetrySink.publishTelemetry(telemetry)
                 }
             }
@@ -160,7 +169,7 @@ public final class TrackingPipeline {
         if let sender = osc { Task { await sender.stop() } }
         osc = nil
         processor.reset()
-        fps = 0; previewPoints = []; leveledBox = .invalid
+        fps = 0; previewPoints = []; previewImage = nil; leveledBox = .invalid
     }
 
     /// Recenter: clear the smoother/solver state so a fresh standing pose re-seeds
@@ -180,9 +189,10 @@ public final class TrackingPipeline {
         }
     }
 
-    private func publishPreview(_ points: [SIMD2<Float>]) {
+    private func publishPreview(_ points: [SIMD2<Float>], image: CGImage?) {
         guard isRunning else { return }
         previewPoints = points
+        previewImage = image
     }
 
     private func publishTelemetry(_ t: Telemetry) {
