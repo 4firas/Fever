@@ -79,10 +79,10 @@ public final class SMPL24Solver {
         for (slot, qraw) in raws {
             eulers[slot] = quaternionToEulerZXYDegrees(qraw)
         }
-        // Fever's space inverts hip pitch (bow reads as −); negate it. Yaw/roll are
-        // already correct (live: negating yaw made the hip turn opposite, so calc's
-        // yaw direction is the right one).
+        // Fever's space inverts pitch (bow reads as −); negate it for the hip AND the
+        // chest (both solved in the same calc space). Yaw/roll come out correct.
         if var he = eulers[1] { he.x = -he.x; eulers[1] = he }
+        if var ce = eulers[4] { ce.x = -ce.x; eulers[4] = ce }
 
         // Hip tracker sits at the SMPL root (≈ groin); raise it toward the lower
         // spine so VRChat places the hip bone at the waist (user: "too low").
