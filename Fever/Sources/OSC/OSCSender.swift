@@ -53,7 +53,7 @@ public actor OSCSender {
     /// perfectly, so PinoFBT must send chest rotation (the earlier "chest = position
     /// only" capture had the chest tracker off). Chest uses the exact calc_chest.
     /// Elbows are dropped (monocular arm tracking floats). Head = position-only anchor.
-    public static let rotationSlots: Set<String> = ["1", "2", "3", "4", "5", "6"]
+    public static let rotationSlots: Set<String> = ["1", "2", "3", "4", "5", "6", "7", "8"]
 
     /// Per-slot LAST-VALID position, keyed by slot id ("1".."8", "head"). When a
     /// joint blips out of detection or the solver yields a degenerate value, the

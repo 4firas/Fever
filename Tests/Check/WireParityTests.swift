@@ -37,11 +37,14 @@ enum WireParityTests {
     }
 
     static func run(_ t: TestRunner) {
-        t.test("PARITY: shipping DEFAULT is mirror-OFF (matches PinoFBT, Tasks-API frame)") {
+        t.test("PARITY: shipping DEFAULT is mirror-ON (NLF pipeline, L/R verified in VRChat)") {
             UserDefaults.standard.removeObject(forKey: "mirrorTracking")
             let cfg = TrackingConfig()
-            t.check(cfg.mirrorTracking == false,
-                    "default mirrorTracking must be false (Tasks-API: left→−X like PinoFBT): \(cfg.mirrorTracking)")
+            // The NLF/SMPL-24 pipeline ships mirror ON: it gives correct L/R positions
+            // (user-confirmed) and the solver's raw-frame calc (calcWorld = -world) relies
+            // on world = (-jx,-jy,-jz), i.e. mirrorX + flipY + flipZ all on.
+            t.check(cfg.mirrorTracking == true,
+                    "default mirrorTracking must be true (NLF pipeline): \(cfg.mirrorTracking)")
         }
 
         t.test("PARITY: the shipping (mirror-OFF) net map preserves the Tasks-API frame (det +1)") {

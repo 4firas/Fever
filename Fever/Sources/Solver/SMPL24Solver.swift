@@ -45,15 +45,18 @@ public final class SMPL24Solver {
         func j(_ joint: SMPLJoint) -> SIMD3<Float> { world[joint.rawValue] }
         let identity = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
 
-        // calc_root expects PinoFBT's landmark frame. Derived from a video diff vs a
-        // PinoFBT OSC capture: Fever's world = (-jx,-jy,-jz) (a left-handed reflection)
-        // makes calc's forward = cross(spine,hipline) antiparallel to the +Z reference
-        // → get_rotation's degenerate 180° case → the wild yaw jitter we saw. Flipping
-        // exactly ONE of X/Y restores a stable forward; this maps to (-world.x, world.y,
-        // -world.z). That nails yaw + roll signs vs PinoFBT; pitch comes out inverted
-        // (handled below) — no signed axis map can flip pitch alone (calc_root is
-        // nonlinear), so we negate the hip pitch euler.
-        let calcWorld = world.map { SIMD3<Float>(-$0.x, $0.y, -$0.z) }
+        // calc_root/calc_chest run on the RAW model joints (camera frame: +Y down,
+        // +Z away), with forward = -Z (toward camera) and up = -Y. This is PinoFBT's
+        // actual setup, recovered by searching right-handed transforms × axis signs
+        // against a labelled video fixture: it's the ONLY one that gives all of
+        // bow→pitch+, lean→pitch-, turnL→yaw-, turnR→yaw+, sbR→roll- with a stable
+        // near-identity rest. Crucially it's a RIGHT-HANDED (identity) transform, so
+        // the output is a valid rotation — the earlier left-handed flip-Y + pitch-negate
+        // produced MIRRORED rotations that broke combined poses (side-bend "impossible
+        // anatomy", facing-away snaps). world = (-jx,-jy,-jz), so raw = -world.
+        let calcWorld = world.map { -$0 }
+        let fwd = SIMD3<Float>(0, 0, -1)   // a1: forward toward camera
+        let upRef = SIMD3<Float>(0, -1, 0) // a2: up (raw frame is +Y-down)
 
         var positions: [Int: SIMD3<Float>] = [:]
         var raws: [Int: simd_quatf] = [:]
@@ -61,8 +64,8 @@ public final class SMPL24Solver {
             positions[slot.index] = world[slot.joint.rawValue]
             let q: simd_quatf
             switch slot.index {
-            case 1:  q = calcRootRotation(calcWorld)    // hip — exact PinoFBT calc_root
-            case 4:  q = calcChestRotation(calcWorld)   // chest — exact PinoFBT calc_chest
+            case 1:  q = calcRootRotation(calcWorld, a1: fwd, a2: upRef)   // hip
+            case 4:  q = calcChestRotation(calcWorld, a1: fwd, a2: upRef)  // chest
             default:
                 guard let b = Self.bones[slot.index] else { continue }
                 q = frameFromTwoAxes(primary: j(b.pB) - j(b.pA),
@@ -79,14 +82,9 @@ public final class SMPL24Solver {
         for (slot, qraw) in raws {
             eulers[slot] = quaternionToEulerZXYDegrees(qraw)
         }
-        // Fever's space inverts pitch (bow reads as −); negate it for the hip AND the
-        // chest (both solved in the same calc space). Yaw/roll come out correct.
-        // The hip is then EXACT calc_root — identical to what PinoFBT ships, no gain.
-        // (An earlier "amplify hip relative to chest" experiment blew up whole-body
-        // side-bends: calc_root and calc_chest roll by different amounts, so their
-        // difference is large and scaling it broke the avatar. Removed.)
-        if var he = eulers[1] { he.x = -he.x; eulers[1] = he }
-        if var ce = eulers[4] { ce.x = -ce.x; eulers[4] = ce }
+        // No euler hacks: the right-handed raw-frame setup above gives correct signs
+        // directly (bow→pitch+, lean→pitch-, turnL→yaw-, turnR→yaw+, sbR→roll-), so the
+        // hip and chest are now EXACT PinoFBT calc_root/calc_chest with valid rotations.
 
         // Hip tracker sits at the SMPL root (≈ groin); raise its HEIGHT toward the
         // lower spine (waist) but keep full pelvis X/Z so lateral hip sway isn't damped.
