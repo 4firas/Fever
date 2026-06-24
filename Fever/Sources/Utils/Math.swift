@@ -255,6 +255,19 @@ public func shortestArc(_ u: SIMD3<Float>, _ v: SIMD3<Float>) -> simd_quatf {
     return simd_normalize(simd_quatf(ix: c.x, iy: c.y, iz: c.z, r: d + 1))
 }
 
+/// Clamp a rotation's per-frame change: if `newQ` is more than `maxDegrees` away
+/// from `previous`, return a slerp capped at that angle. The monocular model flips
+/// its hip/spine estimate ~180° when the subject faces away and moves a limb (its
+/// front/back guess crosses over); bounding the per-frame delta turns that snap into
+/// a contained, self-correcting move. Real human rotation stays far under the cap.
+public func rateLimited(_ newQ: simd_quatf, previous: simd_quatf?, maxDegrees: Float) -> simd_quatf {
+    guard let previous else { return newQ }
+    let dot = min(1, abs(simd_dot(previous.vector, newQ.vector)))
+    let angle = 2 * acos(dot) * (180 / Float.pi)
+    guard angle.isFinite, angle > maxDegrees else { return newQ }
+    return simd_slerp(previous, newQ, maxDegrees / angle)
+}
+
 /// PinoFBT `calc_root_rotation` — pelvis/hip orientation. Uses SMPL joints
 /// leftHip(1), rightHip(2), spine1(3), spine2(6). `a1` = forward ref, `a2` = up ref.
 /// Verified against the compiled core (max err ~1e-3 on realistic poses).

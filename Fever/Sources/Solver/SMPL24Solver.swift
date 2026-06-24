@@ -62,7 +62,7 @@ public final class SMPL24Solver {
         var raws: [Int: simd_quatf] = [:]
         for slot in TrackerMapA.slots {
             positions[slot.index] = world[slot.joint.rawValue]
-            let q: simd_quatf
+            var q: simd_quatf
             switch slot.index {
             case 1:  q = calcRootRotation(calcWorld, a1: fwd, a2: upRef)   // hip
             case 4:  q = calcChestRotation(calcWorld, a1: fwd, a2: upRef)  // chest
@@ -71,6 +71,12 @@ public final class SMPL24Solver {
                 q = frameFromTwoAxes(primary: j(b.pB) - j(b.pA),
                                      secondary: j(b.sB) - j(b.sA),
                                      holdLast: holds[slot.index] ?? identity)
+            }
+            // Bound the hip/chest spine rotation so a model front/back flip (facing
+            // away + raising a leg/arm) can't snap the hips — it becomes a contained,
+            // self-correcting move. 25°/frame @15fps = 375°/s, far above real motion.
+            if slot.index == 1 || slot.index == 4 {
+                q = rateLimited(q, previous: holds[slot.index], maxDegrees: 25)
             }
             if tracked { holds[slot.index] = q }
             raws[slot.index] = q
