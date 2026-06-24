@@ -45,14 +45,21 @@ public final class SMPL24Solver {
         func j(_ joint: SMPLJoint) -> SIMD3<Float> { world[joint.rawValue] }
         let identity = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
 
+        // calc_root/calc_chest expect a RIGHT-HANDED, forward-correct space (PinoFBT's
+        // landmark frame). Fever's world transform is a left-handed reflection with the
+        // facing axis flipped (live capture: hip yaw sat at ~180° = facing backward and
+        // jittered on the ±180 wrap). Negating Z restores right-handedness + forward,
+        // so the hip faces 0° and turns cleanly. Positions stay in world (unchanged).
+        let calcWorld = world.map { SIMD3<Float>($0.x, $0.y, -$0.z) }
+
         var positions: [Int: SIMD3<Float>] = [:]
         var raws: [Int: simd_quatf] = [:]
         for slot in TrackerMapA.slots {
             positions[slot.index] = world[slot.joint.rawValue]
             let q: simd_quatf
             switch slot.index {
-            case 1:  q = calcRootRotation(world)    // hip — exact PinoFBT calc_root
-            case 4:  q = calcChestRotation(world)   // chest — exact PinoFBT calc_chest
+            case 1:  q = calcRootRotation(calcWorld)    // hip — exact PinoFBT calc_root
+            case 4:  q = calcChestRotation(calcWorld)   // chest — exact PinoFBT calc_chest
             default:
                 guard let b = Self.bones[slot.index] else { continue }
                 q = frameFromTwoAxes(primary: j(b.pB) - j(b.pA),
