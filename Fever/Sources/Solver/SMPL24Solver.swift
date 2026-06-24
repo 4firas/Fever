@@ -81,28 +81,22 @@ public final class SMPL24Solver {
         }
         // Fever's space inverts pitch (bow reads as −); negate it for the hip AND the
         // chest (both solved in the same calc space). Yaw/roll come out correct.
+        // The hip is then EXACT calc_root — identical to what PinoFBT ships, no gain.
+        // (An earlier "amplify hip relative to chest" experiment blew up whole-body
+        // side-bends: calc_root and calc_chest roll by different amounts, so their
+        // difference is large and scaling it broke the avatar. Removed.)
         if var he = eulers[1] { he.x = -he.x; eulers[1] = he }
         if var ce = eulers[4] { ce.x = -ce.x; eulers[4] = ce }
-
-        // Amplify the hip's rotation RELATIVE to the chest = pelvic articulation
-        // (tilt/twist of the hips vs the torso). A whole-body turn moves hip+chest
-        // together so their difference ≈ 0 → turns stay 1:1 (no over-rotation); only
-        // isolated pelvic pitch/yaw/roll is boosted — the "hips don't pitch/yaw"
-        // complaint. The hip rotation IS live (log: yaw→55° on a turn) but the
-        // pelvis-vs-torso part is too subtle to read without this gain.
-        if let chest = eulers[4], var hip = eulers[1] {
-            let hipArticGain: Float = 1.5
-            var rel = hip - chest                 // pelvis orientation relative to torso
-            rel.z = -rel.z                         // side-tilt (roll) was mirrored: tilt CW → hips went CCW
-            hip = chest + rel * hipArticGain
-            eulers[1] = hip
-        }
 
         // Hip tracker sits at the SMPL root (≈ groin); raise its HEIGHT toward the
         // lower spine (waist) but keep full pelvis X/Z so lateral hip sway isn't damped.
         var hipPos = j(.pelvis)
         hipPos.y += (j(.spine1).y - j(.pelvis).y) * 0.5
         positions[1] = hipPos
+
+        // Chest tracker is at spine3 (low — "under the rib-cage"); raise it toward the
+        // neck so the working point lands on the sternum where VRChat's chest bone is.
+        positions[4] = j(.spine3) + (j(.neck) - j(.spine3)) * 0.4
 
         let head: SIMD3<Float>
         switch headAnchor {
