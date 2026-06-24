@@ -58,6 +58,19 @@ public final class SMPL24Solver {
         let fwd = SIMD3<Float>(0, 0, -1)   // a1: forward toward camera
         let upRef = SIMD3<Float>(0, -1, 0) // a2: up (raw frame is +Y-down)
 
+        // Forward normal of the hip(1)/chest(4) frame. When the subject faces away it
+        // goes antiparallel to `fwd` — the shortest-arc singularity in calc_*Rotation
+        // (axis undefined → wild spin). Detect it geometrically so we can freeze
+        // through it (proven by simulation: calc_root explodes only within ~±15° of
+        // facing-away; NLF's joints are fine — it's the frame math, not the model).
+        func spineForward(_ slot: Int) -> SIMD3<Float> {
+            if slot == 4 {
+                let lc = calcWorld[13], rc = calcWorld[14]
+                return simd_cross(lc - rc, (lc + rc) * 0.5 - calcWorld[9])
+            }
+            return simd_cross(calcWorld[6] - calcWorld[3], calcWorld[2] - calcWorld[1])
+        }
+
         var positions: [Int: SIMD3<Float>] = [:]
         var raws: [Int: simd_quatf] = [:]
         for slot in TrackerMapA.slots {
@@ -72,11 +85,20 @@ public final class SMPL24Solver {
                                      secondary: j(b.sB) - j(b.sA),
                                      holdLast: holds[slot.index] ?? identity)
             }
-            // Bound the hip/chest spine rotation so a model front/back flip (facing
-            // away + raising a leg/arm) can't snap the hips — it becomes a contained,
-            // self-correcting move. 25°/frame @15fps = 375°/s, far above real motion.
+            // Spine stabilization (hip + chest): freeze the last-good orientation
+            // through the facing-away singularity (forward ≈ antiparallel to the
+            // reference, where calc_*Rotation spins), otherwise rate-limit to absorb
+            // any stray spike. This is what kills the "hips break when I face away and
+            // raise a leg/arm" — the band is held instead of allowed to spin.
             if slot.index == 1 || slot.index == 4 {
-                q = rateLimited(q, previous: holds[slot.index], maxDegrees: 25)
+                let p = spineForward(slot.index)
+                let n = simd_length(p)
+                let singular = n < 1e-6 || simd_dot(p / n, fwd) < -0.95
+                if singular, let last = holds[slot.index] {
+                    q = last
+                } else {
+                    q = rateLimited(q, previous: holds[slot.index], maxDegrees: 25)
+                }
             }
             if tracked { holds[slot.index] = q }
             raws[slot.index] = q
