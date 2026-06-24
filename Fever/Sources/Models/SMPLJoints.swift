@@ -37,6 +37,11 @@ public struct VRTrackerSlot: Sendable {
 /// (hip/pelvis) is the ROOT and the only rotation carrier in the captured build;
 /// every other slot is position-only. `head` is a position-only alignment anchor.
 public enum TrackerMapA {
+    // Standard reliable FBT set: hip + chest + feet + knees. Elbow trackers are
+    // dropped — monocular arm tracking is unreliable (the floating dots above the
+    // shoulder + the elbow driving the chest dot in move-calibrate), and elbow FBT
+    // trackers are uncommon in VRChat (arms ride the controllers/hands). Re-add if
+    // upper-arm tracking ever proves stable.
     public static let slots: [VRTrackerSlot] = [
         VRTrackerSlot(index: 1, path: "1", joint: .pelvis,     sendsRotation: true),
         VRTrackerSlot(index: 2, path: "2", joint: .leftAnkle,  sendsRotation: false),
@@ -44,8 +49,6 @@ public enum TrackerMapA {
         VRTrackerSlot(index: 4, path: "4", joint: .spine3,     sendsRotation: false),
         VRTrackerSlot(index: 5, path: "5", joint: .leftKnee,   sendsRotation: false),
         VRTrackerSlot(index: 6, path: "6", joint: .rightKnee,  sendsRotation: false),
-        VRTrackerSlot(index: 7, path: "7", joint: .leftElbow,  sendsRotation: false),
-        VRTrackerSlot(index: 8, path: "8", joint: .rightElbow, sendsRotation: false),
     ]
 }
 

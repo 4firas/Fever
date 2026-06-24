@@ -307,9 +307,10 @@ private final class FrameProcessor: @unchecked Sendable {
             let v = solved.slotPositions[slot] ?? .zero
             return String(format: "(%.2f,%.2f,%.2f)", v.x, v.y, v.z)
         }
-        // Mirror PinoFBT's capture columns for a direct diff: hip rot + hip pos.
-        let line = String(format: "ht=%.2f  HIProt=%@  HIPpos=%@  CHESTrot=%@\n",
-                          ht, e(1), p(1), e(4))
+        let hp = solved.headPosition
+        // All tracker dot positions (to diagnose mis-placed/floating dots in VRChat).
+        let line = String(format: "head=(%.2f,%.2f,%.2f) hip=%@ chest=%@ Lf=%@ Rf=%@ Lk=%@ Rk=%@  HIProt=%@\n",
+                          hp.x, hp.y, hp.z, p(1), p(4), p(2), p(3), p(5), p(6), e(1))
         if let h = FileHandle(forWritingAtPath: Self.debugPath) {
             h.seekToEndOfFile(); h.write(Data(line.utf8)); try? h.close()
         }
