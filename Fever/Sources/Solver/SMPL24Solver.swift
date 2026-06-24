@@ -45,12 +45,15 @@ public final class SMPL24Solver {
         func j(_ joint: SMPLJoint) -> SIMD3<Float> { world[joint.rawValue] }
         let identity = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
 
-        // calc_root/calc_chest expect a RIGHT-HANDED, forward-correct space (PinoFBT's
-        // landmark frame). Fever's world transform is a left-handed reflection with the
-        // facing axis flipped (live capture: hip yaw sat at ~180° = facing backward and
-        // jittered on the ±180 wrap). Negating Z restores right-handedness + forward,
-        // so the hip faces 0° and turns cleanly. Positions stay in world (unchanged).
-        let calcWorld = world.map { SIMD3<Float>($0.x, $0.y, -$0.z) }
+        // calc_root expects PinoFBT's landmark frame. Derived from a video diff vs a
+        // PinoFBT OSC capture: Fever's world = (-jx,-jy,-jz) (a left-handed reflection)
+        // makes calc's forward = cross(spine,hipline) antiparallel to the +Z reference
+        // → get_rotation's degenerate 180° case → the wild yaw jitter we saw. Flipping
+        // exactly ONE of X/Y restores a stable forward; this maps to (-world.x, world.y,
+        // -world.z). That nails yaw + roll signs vs PinoFBT; pitch comes out inverted
+        // (handled below) — no signed axis map can flip pitch alone (calc_root is
+        // nonlinear), so we negate the hip pitch euler.
+        let calcWorld = world.map { SIMD3<Float>(-$0.x, $0.y, -$0.z) }
 
         var positions: [Int: SIMD3<Float>] = [:]
         var raws: [Int: simd_quatf] = [:]
@@ -76,6 +79,9 @@ public final class SMPL24Solver {
         for (slot, qraw) in raws {
             eulers[slot] = quaternionToEulerZXYDegrees(qraw)
         }
+        // Pitch comes out inverted in Fever's space vs PinoFBT (bow → −pitch instead
+        // of +); negate the hip pitch so a forward bow reads as PinoFBT does.
+        if var he = eulers[1] { he.x = -he.x; eulers[1] = he }
 
         // Hip tracker sits at the SMPL root (≈ groin); raise it toward the lower
         // spine so VRChat places the hip bone at the waist (user: "too low").
