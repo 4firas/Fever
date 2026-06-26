@@ -33,34 +33,71 @@ public struct VRTrackerSlot: Sendable {
     }
 }
 
-/// Tracker map A — wire-confirmed PinoFBT VRChat mapping (findings §7). Slot 1
-/// (hip/pelvis) is the ROOT and the only rotation carrier in the captured build;
-/// every other slot is position-only. `head` is a position-only alignment anchor.
-public enum TrackerMapA {
-    // Full PinoFBT tracker set: hip + feet + chest + knees + elbows.
+/// Tracker map PINO — the BYTE-EXACT desktop PinoFBT 2.0 VRChat slot numbering
+/// (live-confirmed by correlating each slot's euler magnitude to its solver quat):
+///   1=chest 2=hip 3=L_elbow 4=R_elbow 5=L_knee 6=R_knee 7=L_ankle 8=R_ankle.
+/// Both `/position` and `/rotation` are emitted for all 8; head is `/position` only.
+/// This is the default for the 1:1 port (`PinoSolver` keys its slots by these
+/// indices). The `joint` field is informational; positions come straight from the
+/// solver by slot index.
+public enum TrackerMapPino {
     public static let slots: [VRTrackerSlot] = [
-        VRTrackerSlot(index: 1, path: "1", joint: .pelvis,     sendsRotation: true),
-        VRTrackerSlot(index: 2, path: "2", joint: .leftAnkle,  sendsRotation: false),
-        VRTrackerSlot(index: 3, path: "3", joint: .rightAnkle, sendsRotation: false),
-        VRTrackerSlot(index: 4, path: "4", joint: .spine3,     sendsRotation: false),
-        VRTrackerSlot(index: 5, path: "5", joint: .leftKnee,   sendsRotation: false),
-        VRTrackerSlot(index: 6, path: "6", joint: .rightKnee,  sendsRotation: false),
-        VRTrackerSlot(index: 7, path: "7", joint: .leftElbow,  sendsRotation: false),
-        VRTrackerSlot(index: 8, path: "8", joint: .rightElbow, sendsRotation: false),
+        VRTrackerSlot(index: 1, path: "1", joint: .spine3,     sendsRotation: true),  // chest
+        VRTrackerSlot(index: 2, path: "2", joint: .pelvis,     sendsRotation: true),  // hip
+        VRTrackerSlot(index: 3, path: "3", joint: .leftElbow,  sendsRotation: true),  // L_elbow
+        VRTrackerSlot(index: 4, path: "4", joint: .rightElbow, sendsRotation: true),  // R_elbow
+        VRTrackerSlot(index: 5, path: "5", joint: .leftKnee,   sendsRotation: true),  // L_knee
+        VRTrackerSlot(index: 6, path: "6", joint: .rightKnee,  sendsRotation: true),  // R_knee
+        VRTrackerSlot(index: 7, path: "7", joint: .leftAnkle,  sendsRotation: true),  // L_ankle
+        VRTrackerSlot(index: 8, path: "8", joint: .rightAnkle, sendsRotation: true),  // R_ankle
     ]
 }
 
-/// Which model joint feeds the continuous `head/position` anchor. Default head(15);
-/// exposed because the exact head-anchor source is an open item (findings §7/§12).
-public enum HeadAnchorSource: String, Sendable, CaseIterable {
-    case head15, neck12, headNeckMidpoint
+/// The semantic body trackers Fever streams to VRChat: the 8 numbered slots plus
+/// the head reference. Purely a UI/labelling type — the wire slot numbering lives
+/// in `TrackerMapPino` and the solved values come straight from `PinoSolver` by
+/// slot index. (1=chest 2=hip 3/4=elbows 5/6=knees 7/8=ankles, head=anchor.)
+public enum JointType: String, CaseIterable, Codable, Sendable {
+    case head, chest, hip
+    case leftElbow, rightElbow
+    case leftKnee, rightKnee
+    case leftFoot, rightFoot
 
-    /// Primary joint (midpoint blends head+neck downstream).
-    public var primaryJoint: SMPLJoint {
+    public var isLeft: Bool {
         switch self {
-        case .head15:           return .head
-        case .neck12:           return .neck
-        case .headNeckMidpoint: return .head
+        case .leftElbow, .leftKnee, .leftFoot: return true
+        default: return false
+        }
+    }
+
+    /// Fixed PinoFBT desktop OSC slot path for this tracker ("1"…"8", or "head").
+    public var pinoSlot: String {
+        switch self {
+        case .chest:      "1"
+        case .hip:        "2"
+        case .leftElbow:  "3"
+        case .rightElbow: "4"
+        case .leftKnee:   "5"
+        case .rightKnee:  "6"
+        case .leftFoot:   "7"
+        case .rightFoot:  "8"
+        case .head:       "head"
+        }
+    }
+
+    /// Reverse map: the tracker a given PinoFBT slot path drives (nil if unknown).
+    public static func forPinoSlot(_ slot: String) -> JointType? {
+        switch slot {
+        case "1": .chest
+        case "2": .hip
+        case "3": .leftElbow
+        case "4": .rightElbow
+        case "5": .leftKnee
+        case "6": .rightKnee
+        case "7": .leftFoot
+        case "8": .rightFoot
+        case "head": .head
+        default: nil
         }
     }
 }

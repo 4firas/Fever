@@ -14,9 +14,10 @@ import AVFoundation
 ///  - `videoGravity = .resizeAspect` so the WHOLE camera frame is always visible
 ///    (no cropping), letterboxed in the kurokula background inside the detail
 ///    area. This also makes the skeleton overlay align exactly.
-///  - The connection is horizontally mirrored (front/built-in webcam), matching
-///    the horizontal mirror the pose pipeline applies, so the on-screen skeleton
-///    lines up with the mirrored video the way a user expects from a "mirror".
+///  - The preview is ALWAYS horizontally mirrored (selfie view) — via the capture
+///    connection where supported, else a layer transform — matching the pose
+///    pipeline's mirror and the overlay's flip so the skeleton lines up on ANY
+///    camera (built-in or external), the way a user expects from a "mirror".
 ///
 /// When there is no session yet (stub source, denied access, or the camera has
 /// not produced its first frame), the view shows an explicit SwiftUI
@@ -31,6 +32,12 @@ struct CameraPreview: View {
     /// Whether the OS has granted camera access. Drives the placeholder copy
     /// between "grant access" and "starting up".
     let authorized: Bool
+    /// Whether a session is active. When false (and access is granted) the
+    /// placeholder is an explicit "press Start" call-to-action rather than a
+    /// "starting…" spinner-state or a blank rectangle.
+    var running: Bool = false
+    /// What pressing Start will do in the current mode (shown in the idle CTA).
+    var startHint: String = "Press Start to begin tracking."
     /// The frame inference last ran on. When non-nil (running) it's drawn over the
     /// live layer, so the visible preview advances at the inference rate — preview
     /// fps == inference fps. nil (stopped) falls through to the live camera layer.
@@ -58,6 +65,15 @@ struct CameraPreview: View {
                 Label("Camera Access Needed", systemImage: "video.slash")
             } description: {
                 Text("Grant access in System Settings ▸ Privacy & Security ▸ Camera, then restart Fever.")
+            }
+            .foregroundStyle(.white)
+        } else if !running {
+            // Idle, access granted: tell the user exactly how to begin, instead of a
+            // misleading "starting…" or a blank kurokula rectangle.
+            ContentUnavailableView {
+                Label("Ready", systemImage: "play.circle")
+            } description: {
+                Text(startHint)
             }
             .foregroundStyle(.white)
         } else {
@@ -139,20 +155,23 @@ private struct PreviewLayerView: NSViewRepresentable {
             preview.videoGravity = .resizeAspect
             preview.frame = bounds
 
-            // Horizontally mirror the front/built-in webcam preview so it reads
-            // like a mirror and matches the pose pipeline's horizontal mirror.
+            // ALWAYS present a mirrored ("selfie") preview, so it matches both the pose
+            // pipeline's horizontal mirror AND the skeleton overlay's fixed x-flip,
+            // regardless of which camera is selected. Built-in cams mirror via the
+            // capture connection; external/USB cams whose connection can't mirror are
+            // mirrored with a layer transform instead. Without this, an external camera
+            // (which CameraCapture PREFERS) showed an un-mirrored image under a flipped
+            // skeleton — the skeleton landed reversed on the body.
             if let connection = preview.connection, connection.isVideoMirroringSupported {
                 connection.automaticallyAdjustsVideoMirroring = false
                 connection.isVideoMirrored = true
+            } else {
+                preview.transform = CATransform3DMakeScale(-1, 1, 1)
             }
 
-            // Match the inferred-frame layer's mirror to the live layer's EFFECTIVE
-            // mirror (true for the built-in webcam, false for an external/GoPro that
-            // doesn't support mirroring) so the inferred frame and the skeleton overlay
-            // stay aligned regardless of which camera is selected.
-            let mirrored = preview.connection?.isVideoMirrored ?? false
-            inferredLayer?.transform = mirrored ? CATransform3DMakeScale(-1, 1, 1)
-                                                 : CATransform3DIdentity
+            // The inferred-frame layer overlays the live layer 1:1, so it mirrors the
+            // same way the (now always-mirrored) preview does.
+            inferredLayer?.transform = CATransform3DMakeScale(-1, 1, 1)
 
             // Below the inferred-frame layer so, while running, the inferred frame
             // (inference rate) covers the live feed; when stopped the live feed shows.

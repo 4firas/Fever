@@ -5,8 +5,8 @@ import simd
 ///
 /// `joints3D` are CAMERA-space meters with **+Y down** (head ≈ 0.45, feet ≈ 1.9 on a
 /// standing person) and right-handed — NOT the floor-anchored +Y-up VRChat frame.
-/// The conversion (Y/Z negate, optional X-mirror, height scale) is applied later by
-/// `CameraToWorldTransform`. `joints2D` are pixels in the fed frame (top-left origin).
+/// The conversion (pelvis-center, 180°-about-X flip, torso/leg scale) is applied later
+/// by `PinoKinematics.preprocessJoints`. `joints2D` are pixels in the fed frame (top-left origin).
 public struct SMPLPose: Sendable {
     public var joints3D: [SIMD3<Float>]   // count == SMPLJoint.count (24)
     public var joints2D: [SIMD2<Float>]   // count == 24, pixels in the fed frame

@@ -10,7 +10,7 @@ import AppKit
 /// launch explicitly via `FeverApp.main()` for the `--ui` path.
 ///
 /// Usage:
-///   Fever                         headless: camera + MediaPipe pose (Python sidecar), OSC -> 127.0.0.1:9000
+///   Fever                         headless: camera + NLF pose (onnxruntime sidecar), OSC -> 127.0.0.1:9000
 ///   Fever --ui                    launch the SwiftUI (Liquid Glass) window app
 ///   Fever --stub                  headless, hardware-free: synthetic frames + synthetic pose
 ///   Fever --no-osc                run the pipeline + telemetry, transmit nothing
@@ -47,7 +47,7 @@ enum FeverMain {
 
         // SINGLE-INSTANCE GUARD (GUI/bundle only): if another Fever is
         // already running, focus it and exit. Stacked instances each spin up
-        // their own camera session + MediaPipe sidecar pipeline, fighting for
+        // their own camera session + NLF sidecar pipeline, fighting for
         // the same hardware and collapsing frame rate — the cause of the earlier
         // "ghost process / 3fps". CLI/headless runs are exempt (you may want
         // several).
@@ -69,23 +69,23 @@ enum FeverMain {
 
         if useUI {
             // The SwiftUI scene owns its own TrackingConfig + TrackingPipeline
-            // (live camera + MediaPipe sidecar). It reads the same persisted host/port we
+            // (live camera + NLF sidecar). It reads the same persisted host/port we
             // just wrote above. This call does not return until the app quits.
             FeverApp.main()
             return
         }
 
         // Headless. --stub => fully hardware-free (synthetic frames + pose);
-        // otherwise live camera + MediaPipe body pose (sidecar). The sidecar
+        // otherwise live camera + NLF body pose (onnxruntime sidecar). The sidecar
         // backend falls back to the stub if it isn't installed so the app runs.
         let source: FrameSource = useStub ? StubFrameSource() : CameraCapture()
         let landmarker: any NLFPoseSource = useStub ? StubNLFLandmarker() : makeLiveNLFLandmarker()
 
-        // In synthetic stub mode, fire a one-shot Recenter shortly after start so
-        // the streamed `/rotation` is the CALIBRATED, rest-relative euler (≈ 0 at
-        // the rest pose, bounded under motion) rather than the uncalibrated
-        // absolute orientation. Live tracking leaves calibration to the user's
-        // Recenter (auto-recentering a real session mid-pose would be surprising).
+        // In synthetic stub mode, fire a one-shot Recenter shortly after start so the
+        // smoother re-seeds cleanly before the streamed `/rotation` is checked. Recenter
+        // resets the smoother + solver elbow-hold only — rotations stay ABSOLUTE Unity
+        // ZXY (PinoFBT 1:1; VRChat re-origins via head/position). Live tracking leaves
+        // Recenter to the user (auto-recentering a real session mid-pose would surprise).
         let runner = HeadlessRunner(config: config,
                                     source: source,
                                     landmarker: landmarker,
@@ -114,9 +114,6 @@ enum FeverMain {
             }
         }
 
-        // Headless runs send trackers regardless of the persisted GUI toggle.
-        config.enableTracker = true
-
         if noOSC {
             // Black-hole the transmit path (TEST-NET-1 / discard sink) without
             // disabling the rest of the pipeline.
@@ -133,7 +130,7 @@ enum FeverMain {
 
     private static func printUsage() {
         let usage = """
-        Fever — webcam full-body VR tracker (MediaPipe pose (Python sidecar) -> VRChat OSC)
+        Fever — webcam full-body VR tracker (NLF pose (onnxruntime sidecar) -> VRChat OSC)
 
         USAGE:
           Fever [options]
@@ -150,7 +147,7 @@ enum FeverMain {
         DEFAULT (no options):
           Launched as Fever.app (Finder/Dock) -> opens the GUI window.
           Run as a bare CLI binary -> headless live tracking (built-in camera +
-          MediaPipe sidecar pose, streaming VRChat trackers to 127.0.0.1:9000).
+          NLF onnxruntime sidecar pose, streaming VRChat trackers to 127.0.0.1:9000).
         """
         print(usage)
     }

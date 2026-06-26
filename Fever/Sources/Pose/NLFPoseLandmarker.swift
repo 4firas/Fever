@@ -1,3 +1,4 @@
+import Accelerate
 import CoreVideo
 import CoreImage
 import Foundation
@@ -8,6 +9,13 @@ import simd
 public protocol NLFPoseSource: AnyObject {
     func detect(_ pixelBuffer: CVPixelBuffer, at time: TimeInterval) async -> SMPLPose?
     func reset()
+    /// False for the synthetic stub (canned standing pose used when the NLF runtime
+    /// isn't installed) so the UI can warn that it's a DEMO, not real tracking.
+    var isLive: Bool { get }
+}
+
+public extension NLFPoseSource {
+    var isLive: Bool { true }
 }
 
 /// Pose backend backed by the NLF onnxruntime sidecar: downscales each camera
@@ -69,14 +77,17 @@ public final class NLFPoseLandmarker {
             ok = true
         }
         guard ok else { return nil }
-        rgbBuffer.withUnsafeMutableBytes { dstD in
-            let d = dstD.bindMemory(to: UInt8.self)
-            rgbaScratch.withUnsafeBufferPointer { s in
-                for i in 0..<(width * height) {
-                    d[i * 3]     = s[i * 4]
-                    d[i * 3 + 1] = s[i * 4 + 1]
-                    d[i * 3 + 2] = s[i * 4 + 2]
-                }
+        // Pack RGBA8888 → tightly-packed RGB888 (drop alpha) via Accelerate — a
+        // vectorized one-pass channel drop, identical bytes to the old per-pixel
+        // loop but off the scalar path, freeing the CPU for the GPU/ANE-bound model.
+        rgbaScratch.withUnsafeMutableBytes { srcRaw in
+            rgbBuffer.withUnsafeMutableBytes { dstRaw in
+                guard let sb = srcRaw.baseAddress, let db = dstRaw.baseAddress else { return }
+                var src = vImage_Buffer(data: sb, height: vImagePixelCount(height),
+                                        width: vImagePixelCount(width), rowBytes: width * 4)
+                var dst = vImage_Buffer(data: db, height: vImagePixelCount(height),
+                                        width: vImagePixelCount(width), rowBytes: width * 3)
+                vImageConvert_RGBA8888toRGB888(&src, &dst, vImage_Flags(kvImageNoFlags))
             }
         }
         return rgbBuffer
@@ -127,7 +138,9 @@ public final class StubNLFLandmarker {
 }
 
 extension NLFPoseLandmarker: NLFPoseSource {}
-extension StubNLFLandmarker: NLFPoseSource {}
+extension StubNLFLandmarker: NLFPoseSource {
+    public var isLive: Bool { false }   // canned pose — not real tracking
+}
 
 /// The live NLF backend, or the synthetic stub if the runtime isn't installed.
 public func makeLiveNLFLandmarker() -> any NLFPoseSource {

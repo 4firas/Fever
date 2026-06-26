@@ -11,9 +11,6 @@ struct SkeletonOverlay: View {
     /// 24-slot, screen-normalized points (SMPLJoint order); NaN entries are absent.
     let points: [SIMD2<Float>]
 
-    /// Retained for call-site compatibility; the NLF path has no leveled box.
-    var box: LeveledBox = .invalid
-
     /// Locked camera aspect (1280x720) to reproduce the preview aspect-fit.
     private let cameraAspect: CGFloat = 1280.0 / 720.0
 

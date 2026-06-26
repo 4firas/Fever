@@ -37,8 +37,16 @@ public final class NLFSidecar: NLFInferenceService, @unchecked Sendable {
     private var process: Process?
     private var toChild: FileHandle?
     private var fromChild: FileHandle?
+    private var errHandle: FileHandle?    // child stderr; its readabilityHandler must be cleared to release the source
     private var lineBuf = Data()
-    private var launchFailed = false
+    /// Hard, permanent: the child couldn't even spawn (bad python/script path) — no
+    /// point retrying until the config changes.
+    private var spawnFailed = false
+    /// Soft cooldown: a ready-gate timeout/EOF (e.g. a slow first-run CoreML compile or
+    /// a startup hiccup) may be transient, so we allow a RETRY — but not before this
+    /// time, so a sidecar that keeps dying on startup can't become a respawn storm.
+    private var retryNotBefore = Date.distantPast
+    private static let retryCooldown: TimeInterval = 5
 
     public init(paths: NLFPaths) { self.paths = paths }
 
@@ -62,7 +70,8 @@ public final class NLFSidecar: NLFInferenceService, @unchecked Sendable {
 
     private func ensureRunning() -> Bool {
         if let p = process, p.isRunning { return true }
-        if launchFailed { return false }
+        if spawnFailed { return false }
+        if Date() < retryNotBefore { return false }    // cooling down after a transient failure
         let p = Process()
         p.executableURL = URL(fileURLWithPath: paths.python)
         p.arguments = [paths.script, paths.model]      // positional sys.argv[1] = model
@@ -70,16 +79,23 @@ public final class NLFSidecar: NLFInferenceService, @unchecked Sendable {
         p.standardInput = inPipe; p.standardOutput = outPipe; p.standardError = errPipe
         do { try p.run() } catch {
             FileHandle.standardError.write(Data("[NLFSidecar] spawn FAILED for \(paths.python): \(error)\n".utf8))
-            launchFailed = true; return false
+            spawnFailed = true; return false
         }
         FileHandle.standardError.write(Data("[NLFSidecar] launched \(paths.script)\n".utf8))
 
         toChild = inPipe.fileHandleForWriting
         fromChild = outPipe.fileHandleForReading
-        // forward sidecar stderr (CoreML/onnxruntime logs + errors) so failures are visible
-        errPipe.fileHandleForReading.readabilityHandler = { h in
+        // forward sidecar stderr (CoreML/onnxruntime logs + errors) so failures are visible.
+        // CRITICAL: handle EOF (empty availableData) by nil-ing the handler — that cancels
+        // the underlying dispatch source. Without it, when the child dies the source fires
+        // forever on a now-EOF fd → a 100% CPU spin on a background thread + a leaked
+        // FileHandle/source per sidecar death/restart.
+        let eh = errPipe.fileHandleForReading
+        errHandle = eh
+        eh.readabilityHandler = { h in
             let d = h.availableData
-            if !d.isEmpty { FileHandle.standardError.write(Data("[sidecar] ".utf8) + d) }
+            if d.isEmpty { h.readabilityHandler = nil; return }
+            FileHandle.standardError.write(Data("[sidecar] ".utf8) + d)
         }
 
         // gate on the sidecar's `{"ready":true}` stdout line (model + CoreML compile
@@ -95,7 +111,11 @@ public final class NLFSidecar: NLFInferenceService, @unchecked Sendable {
                 process = p; return true
             }
         }
-        p.terminate(); launchFailed = true
+        // Ready-gate failed (timeout or EOF). Treat as transient: clean up and arm a
+        // cooldown so the NEXT frame retries the launch (a permanent flag here would
+        // disable on-device tracking until app restart after one slow first compile).
+        p.terminate(); retryNotBefore = Date().addingTimeInterval(Self.retryCooldown)
+        errHandle?.readabilityHandler = nil; errHandle = nil   // deliberate stop before EOF → cancel the source ourselves
         toChild = nil; fromChild = nil; lineBuf.removeAll()
         return false
     }
@@ -117,8 +137,9 @@ public final class NLFSidecar: NLFInferenceService, @unchecked Sendable {
 
     private func teardown() {
         process?.terminate()
+        errHandle?.readabilityHandler = nil; errHandle = nil
         process = nil; toChild = nil; fromChild = nil; lineBuf.removeAll()
     }
 
-    deinit { process?.terminate() }
+    deinit { errHandle?.readabilityHandler = nil; process?.terminate() }
 }

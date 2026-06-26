@@ -28,7 +28,9 @@ enum WireDefenseTests {
     static func run(_ t: TestRunner) async {
         await testNoZero(t)
         await testHoldLast(t)
-        testCenter(t)
+        await testRotationHold(t)
+        await testSixPointBundle(t)
+        await testRotationFiniteOrZeroSeed(t)
     }
 
     // MARK: - Shared wire helpers
@@ -58,11 +60,57 @@ enum WireDefenseTests {
         return Decoded(slot: slot, x: f(0), y: f(4), z: f(8))
     }
 
+    /// Decode a single OSC `/tracking/trackers/<slot>/rotation` `,fff` message.
+    static func decodeRotation(_ data: Data) -> Decoded? {
+        let bytes = [UInt8](data)
+        guard let nul = bytes.firstIndex(of: 0),
+              let address = String(bytes: bytes[0..<nul], encoding: .utf8) else { return nil }
+        let prefix = "/tracking/trackers/", suffix = "/rotation"
+        guard address.hasPrefix(prefix), address.hasSuffix(suffix) else { return nil }
+        let slot = String(address.dropFirst(prefix.count).dropLast(suffix.count))
+        let addrBlock = ((address.utf8.count / 4) + 1) * 4
+        guard bytes.count >= addrBlock + 4,
+              bytes[addrBlock] == 0x2C, bytes[addrBlock + 1] == 0x66,
+              bytes[addrBlock + 2] == 0x66, bytes[addrBlock + 3] == 0x66 else { return nil }
+        let argStart = addrBlock + 8
+        guard bytes.count >= argStart + 12 else { return nil }
+        func f(_ off: Int) -> Float {
+            let b = bytes[(argStart + off)..<(argStart + off + 4)]
+            return Float(bitPattern: b.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) })
+        }
+        return Decoded(slot: slot, x: f(0), y: f(4), z: f(8))
+    }
+
+    /// Split an OSC `#bundle` datagram into its element messages. Layout:
+    /// "#bundle\0" (8) + timetag (8) + repeated [int32-BE size][message bytes].
+    static func parseBundle(_ data: Data) -> [Data] {
+        let bytes = [UInt8](data)
+        guard bytes.count > 16,
+              String(bytes: bytes[0..<7], encoding: .utf8) == "#bundle" else { return [] }
+        var out: [Data] = []
+        var i = 16
+        while i + 4 <= bytes.count {
+            let size = Int(bytes[i]) << 24 | Int(bytes[i + 1]) << 16 | Int(bytes[i + 2]) << 8 | Int(bytes[i + 3])
+            i += 4
+            guard size > 0, i + size <= bytes.count else { break }
+            out.append(Data(bytes[i..<(i + size)]))
+            i += size
+        }
+        return out
+    }
+
     /// Stand up a loopback UDP listener, run `body` (which transmits through a
     /// real `OSCSender`), and return ALL decoded position datagrams in order.
     /// Each distinct port keeps the captures isolated between tests.
     static func captureWire(port: UInt16,
                             _ body: (OSCSender) async -> Void) async -> [Decoded] {
+        await captureRaw(port: port, body).compactMap { decodePosition($0) }
+    }
+
+    /// Like `captureWire` but returns the RAW datagrams (so a bundle path can be
+    /// split + decoded by the caller).
+    static func captureRaw(port: UInt16,
+                           _ body: (OSCSender) async -> Void) async -> [Data] {
         let collector = PacketBox()
         let listener: NWListener
         do {
@@ -89,13 +137,15 @@ enum WireDefenseTests {
         await sender.stop()
         listener.cancel()
 
-        return collector.snapshot().compactMap { decodePosition($0) }
+        return collector.snapshot()
     }
 
-    /// True iff a decoded wire position is the forbidden (0,0,0) or carries NaN.
+    /// True iff a decoded wire position is forbidden: NaN on any slot, or (0,0,0) on
+    /// any slot EXCEPT the hip ("2"), whose CORRECT value IS the origin (it's the root
+    /// of the normalized tracker space; PinoFBT sends (0,0,0) for the hip every frame).
     static func isZeroOrNaN(_ d: Decoded) -> Bool {
         if !d.x.isFinite || !d.y.isFinite || !d.z.isFinite { return true }
-        return d.x == 0 && d.y == 0 && d.z == 0
+        return d.slot != "2" && d.x == 0 && d.y == 0 && d.z == 0
     }
 
     // MARK: - Synthetic intermittent-dropout frame sequence
@@ -230,109 +280,108 @@ enum WireDefenseTests {
         }
     }
 
-    // MARK: - 3. CENTER
+    // MARK: - 3. ROTATION HOLD-LAST (the sendPinoBundle live path)
 
-    static func testCenter(_ t: TestRunner) {
-        // Drive the SAME production lift used live, then verify the XZ latch
-        // centres the head's absolute X/Z near 0 while leaving head-relative
-        // (tracker − head) geometry BYTE-IDENTICAL to the un-centered geometry.
-        let (raw, present, image) = GeometrySanity.makeUprightRaw()
-        let liftEngine = MonocularDepthLift(referenceHeight: 1.8)
-        guard let pose = GeometrySanity.lift(raw, present, image, using: liftEngine) else {
-            t.test("CENTER: lift produced a pose") { t.check(false, "lift returned nil") }
-            return
-        }
+    /// Mirrors the position hold-last, but for ROTATION on the bundle path: a slot
+    /// present with rotation A → drops (position NaN AND rotation snapped to identity
+    /// 0,0,0, as a degenerate ~0 bone yields) → reappears with rotation B. The wire
+    /// must HOLD rotation A through the gap (never identity), then resume to B.
+    static func testRotationHold(_ t: TestRunner) async {
+        let posA = SIMD3<Float>(0.37, 0.81, -0.22), rotA = SIMD3<Float>(31, -14, 47)
+        let posB = SIMD3<Float>(0.40, 0.79, -0.25), rotB = SIMD3<Float>(-22, 60, 12)
 
-        let cfg = TrackingConfig()
-        cfg.mirrorTracking = false
-        cfg.userHeightMeters = 1.74
-        let solver = JointSolver(settings: cfg)
-        let joints = solver.solve(pose)
-        let mapper = CoordinateMapper(userHeightMeters: 1.74,
-                                      referenceHeightMeters: 1.8,
-                                      mirrorHorizontally: false)
-        let assembler = TrackerAssembler(enabled: cfg.enabledJoints, slotMap: cfg.slotMap)
-        let (body, headOpt) = assembler.assemble(joints, mapper: mapper)
-
-        t.test("CENTER: head absolute X/Z centred near 0 after the XZ latch") {
-            guard let head = headOpt else { t.check(false, "no head reference"); return }
-            // The latch was seeded on this standing frame, so the centred frame's
-            // head must sit near the world origin in the horizontal plane (PinoFBT
-            // sits near X≈0; ours used to land ~+2.1 m). Y is owned by the floor
-            // latch and is NOT expected to be 0.
-            t.check(abs(head.position.x) < 0.20,
-                    "head abs X must be centred near 0: \(head.position.x)")
-            t.check(abs(head.position.z) < 0.20,
-                    "head abs Z must be centred near 0: \(head.position.z)")
-            // Confirm the origin latch actually fired (so the centring is real,
-            // not vacuous): the engine holds a non-trivial latched XZ origin.
-            if let o = liftEngine.originReferenceXZ {
-                print(String(format: "  [center] latched origin XZ = (%+.4f, %+.4f); head abs = (%+.4f, %+.4f, %+.4f)",
-                             o.x, o.y, head.position.x, head.position.z,
-                             head.position.x, head.position.y, head.position.z))
+        let raw = await captureRaw(port: 9103) { sender in
+            func frame(pos: SIMD3<Float>, rot: SIMD3<Float>) -> [OSCTracker] {
+                [OSCTracker(slot: "1", position: pos, eulerDegrees: rot),
+                 // Hip is always valid (origin is its correct value) so the bundle is never empty.
+                 OSCTracker(slot: "2", position: .zero, eulerDegrees: .zero)]
+            }
+            for _ in 0..<3 {
+                await sender.sendPinoBundle(trackers: frame(pos: posA, rot: rotA), head: nil)
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            // Dropout: position NaN (→ held) AND rotation snapped to identity (0,0,0).
+            for _ in 0..<6 {
+                await sender.sendPinoBundle(trackers: frame(pos: SIMD3<Float>(.nan, .nan, .nan), rot: .zero), head: nil)
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            for _ in 0..<3 {
+                await sender.sendPinoBundle(trackers: frame(pos: posB, rot: rotB), head: nil)
+                try? await Task.sleep(nanoseconds: 20_000_000)
             }
         }
 
-        t.test("CENTER: head-relative geometry byte-identical to pre-centering") {
-            guard let head = headOpt else { t.check(false, "no head reference"); return }
+        let rots = raw.flatMap { parseBundle($0) }.compactMap { decodeRotation($0) }.filter { $0.slot == "1" }
 
-            // Re-run the EXACT chain on a SECOND engine whose XZ origin we hold at
-            // (0,0) — i.e. NO centring — by seeding the latch with zero before any
-            // real frame. Because latchOriginXZ latches the FIRST value it sees,
-            // pre-seeding (0,0) yields the un-centered ("raw absolute") geometry.
-            let rawEngine = MonocularDepthLift(referenceHeight: 1.8)
-            _ = rawEngine.latchOriginXZ(.zero)   // freeze origin at 0 → no shift
-            guard let rawPose = GeometrySanity.lift(raw, present, image, using: rawEngine) else {
-                t.check(false, "raw (un-centered) lift returned nil"); return
+        t.test("HOLD-LAST (rotation): dropout holds rotation A, never identity, then resumes B") {
+            t.check(!rots.isEmpty, "no slot-1 rotation datagrams captured")
+            func near(_ d: Decoded, _ p: SIMD3<Float>) -> Bool {
+                abs(d.x - p.x) < 1e-3 && abs(d.y - p.y) < 1e-3 && abs(d.z - p.z) < 1e-3
             }
-            let rawJoints = solver.solve(rawPose)
-            let (rawBody, rawHeadOpt) = assembler.assemble(rawJoints, mapper: mapper)
-            guard let rawHead = rawHeadOpt else { t.check(false, "no raw head reference"); return }
-
-            // Head-relative vectors must be BIT-FOR-BIT identical between the
-            // centered and un-centered runs (the latch removes the SAME constant
-            // from head + every body joint, so (tracker − head) is invariant).
-            var bySlot = [String: OSCTracker](); for tr in body { bySlot[tr.slot] = tr }
-            var rawBySlot = [String: OSCTracker](); for tr in rawBody { rawBySlot[tr.slot] = tr }
-
-            // The centering subtracts the SAME constant origin from the head and
-            // every body joint in the SOLVER frame, BEFORE the mapper's uniform
-            // scale, so the post-scale relative vector  s·(c−o) − s·(head−o) =
-            // s·(c−head)  is mathematically identical to the un-centered
-            // s·c − s·head. The only possible difference is a sub-ULP float
-            // rounding artifact from the independent rounding of each scaled term;
-            // assert exact equality within a 1e-5 m (10 micron) tolerance, AND
-            // count how many are bit-for-bit identical.
-            var changed = 0     // beyond 10 microns = a real geometry change
-            var bitIdentical = 0
-            var compared = 0
-            for slot in bySlot.keys.sorted() {
-                guard let c = bySlot[slot], let r = rawBySlot[slot] else {
-                    t.check(false, "slot \(slot) missing in one run"); continue
-                }
-                compared += 1
-                let relC = c.position - head.position
-                let relR = r.position - rawHead.position
-                let d = simd_abs(relC - relR)
-                if d.x > 1e-5 || d.y > 1e-5 || d.z > 1e-5 {
-                    changed += 1
-                    print(String(format: "  [center] slot %@ rel CHANGED: centered (%+.6f,%+.6f,%+.6f) vs raw (%+.6f,%+.6f,%+.6f)",
-                                 slot, relC.x, relC.y, relC.z, relR.x, relR.y, relR.z))
-                }
-                if relC.x.bitPattern == relR.x.bitPattern
-                    && relC.y.bitPattern == relR.y.bitPattern
-                    && relC.z.bitPattern == relR.z.bitPattern { bitIdentical += 1 }
-            }
-            t.check(changed == 0,
-                    "\(changed) head-relative tracker(s) changed after centring (geometry must be intact)")
-            print("  [center] \(compared) trackers compared; \(bitIdentical) bit-identical, \(compared - bitIdentical) within 1 ULP, \(changed) changed")
-
-            // And the head ITSELF differs only by the (constant) XZ shift; its
-            // head-relative self-vector is exactly zero in both runs (sanity).
-            let selfC = head.position - head.position
-            t.check(selfC == .zero, "head-relative head must be exactly zero")
+            t.check(rots.allSatisfy { !($0.x == 0 && $0.y == 0 && $0.z == 0) },
+                    "slot 1 rotation snapped to identity (0,0,0) during the dropout")
+            t.check(rots.allSatisfy { near($0, rotA) || near($0, rotB) },
+                    "slot 1 rotation emitted a value that was neither A nor B")
+            t.check(rots.contains { near($0, rotA) }, "slot 1 never emitted the held rotation A")
+            t.check(rots.contains { near($0, rotB) }, "slot 1 never resumed to live rotation B")
+            if let last = rots.last { t.check(near(last, rotB), "final slot-1 rotation must be resumed B") }
+            print("  [hold-last rot] slot-1 rotation samples: \(rots.count); held A, resumed B, identity forbidden")
         }
     }
+
+    // MARK: - 4. 6-POINT BUNDLE (13 messages: no elbows, head position-only)
+
+    /// When the caller passes only the six numbered slots (no 3/4), sendPinoBundle emits
+    /// a 13-message bundle: 6 position + 6 rotation + head/position, with NO head/rotation.
+    static func testSixPointBundle(_ t: TestRunner) async {
+        let sixSlots = ["1", "2", "5", "6", "7", "8"]
+        let raw = await captureRaw(port: 9104) { sender in
+            let body = sixSlots.map {
+                OSCTracker(slot: $0, position: SIMD3<Float>(0.1, 0.2, 0.3), eulerDegrees: SIMD3<Float>(1, 2, 3))
+            }
+            let head = OSCTracker(slot: "head", position: SIMD3<Float>(0, 1.6, 0), eulerDegrees: .zero)
+            for _ in 0..<4 {
+                await sender.sendPinoBundle(trackers: body, head: head)
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+        }
+        t.test("6-POINT bundle = 13 messages (6 pos + 6 rot + head/position, no elbows, no head rotation)") {
+            guard let bundle = raw.last else { t.check(false, "no bundle captured"); return }
+            let elems = parseBundle(bundle)
+            let positions = elems.compactMap { decodePosition($0) }
+            let rotations = elems.compactMap { decodeRotation($0) }
+            t.check(elems.count == 13, "13 total messages, got \(elems.count)")
+            t.check(rotations.count == 6, "6 rotation messages, got \(rotations.count)")
+            t.check(positions.count == 7, "7 position messages (6 body + head), got \(positions.count)")
+            t.check(Set(rotations.map { $0.slot }) == Set(sixSlots), "rotation slots are the 6-point set (no 3/4)")
+            t.check(positions.contains { $0.slot == "head" }, "head/position present")
+            t.check(!rotations.contains { $0.slot == "head" }, "NO head/rotation (position-only head contract)")
+        }
+    }
+
+    // MARK: - 5. ROTATION finiteOrZero seed (no prior latch)
+
+    /// A NaN euler on a slot that has never latched a valid rotation must reach the wire
+    /// as exactly (0,0,0), never NaN (the round-2 finiteOrZero fallback).
+    static func testRotationFiniteOrZeroSeed(_ t: TestRunner) async {
+        let raw = await captureRaw(port: 9105) { sender in
+            let body = [
+                OSCTracker(slot: "1", position: SIMD3<Float>(0.3, 0.4, 0.5), eulerDegrees: SIMD3<Float>(.nan, .nan, .nan)),
+                OSCTracker(slot: "2", position: .zero, eulerDegrees: .zero),   // hip keeps the bundle non-empty
+            ]
+            for _ in 0..<4 {
+                await sender.sendPinoBundle(trackers: body, head: nil)
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+        }
+        let rots = raw.flatMap { parseBundle($0) }.compactMap { decodeRotation($0) }.filter { $0.slot == "1" }
+        t.test("ROTATION finiteOrZero: NaN euler, never latched → exactly (0,0,0), no NaN on the wire") {
+            t.check(!rots.isEmpty, "slot-1 rotation captured")
+            t.check(rots.allSatisfy { $0.x.isFinite && $0.y.isFinite && $0.z.isFinite }, "no NaN/Inf reached the wire")
+            t.check(rots.allSatisfy { $0.x == 0 && $0.y == 0 && $0.z == 0 }, "emitted exactly (0,0,0)")
+        }
+    }
+
 }
 
 // MARK: - Capture plumbing

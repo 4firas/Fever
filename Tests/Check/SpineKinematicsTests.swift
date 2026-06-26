@@ -3,10 +3,15 @@ import simd
 import FeverCore
 
 /// Locks the reverse-engineered PinoFBT spine math (Math.swift `calcRootRotation`
-/// / `calcChestRotation` / `shortestArc`) against ground-truth vectors captured by
-/// EMULATING the compiled `fast_kinematics.pyd` cores (Unicorn). Any drift in the
-/// joint choices, the cross/order, or the quaternion convention trips these.
-/// Oracle: `~/Downloads/fbt_re/oracle_vectors.json` (a1=fwd(0,0,1), a2=up(0,1,0)).
+/// / `calcChestRotation` / `shortestArc`) against ground-truth vectors. Any drift in
+/// the joint choices, the cross/order, or the quaternion convention trips these.
+///
+/// UPDATED for the live capture: `calcRootRotation` is now the DUAL-PRIM (spine1 AND
+/// spine2) 3-quat composition with a1=(0,0,1), a2=(0,1,0); `calcChestRotation` uses
+/// a2 = **X-axis (1,0,0)** (live-confirmed), NOT the old (0,1,0). The chest oracle
+/// quats below were regenerated with the corrected math (the desktop binary's actual
+/// a2), so they lock the BYTE-EXACT 1:1 behavior — see `PinoKinematicsTests` for the
+/// full 40-tick validation against captured I/O.
 enum SpineKinematicsTests {
 
     static func run(_ t: TestRunner) {
@@ -24,24 +29,26 @@ enum SpineKinematicsTests {
 
         struct Case { let n: String; let w: [SIMD3<Float>]; let root: [Float]; let chest: [Float] }
         let cases = [
+            // chest oracle regenerated with the live a2=(1,0,0); on these symmetric
+            // synthetic poses the corrected chest frame coincides with the root.
             Case(n: "rest",
                  w: mk([(1, 0.07, -0.08, 0), (2, -0.07, -0.08, 0), (3, 0, 0.1, 0), (6, 0, 0.22, 0),
                         (9, 0, 0.3, 0), (13, 0.08, 0.42, 0), (14, -0.08, 0.42, 0)]),
-                 root: [0, 0, 0, 1], chest: [0, 0, -0.70711, 0.70711]),
+                 root: [0, 0, 0, 1], chest: [0, 0, 0, 1]),
             Case(n: "yaw30",
                  w: mk([(1, 0.06062, -0.08, -0.035), (2, -0.06062, -0.08, 0.035), (3, 0, 0.1, 0),
                         (6, 0, 0.22, 0), (9, 0, 0.3, 0), (13, 0.06928, 0.42, -0.04), (14, -0.06928, 0.42, 0.04)]),
-                 root: [0, 0.25882, 0, 0.96593], chest: [-0.18301, 0.18301, -0.68301, 0.68301]),
+                 root: [0, 0.25882, 0, 0.96593], chest: [0, 0.25883, 0, 0.96592]),
             Case(n: "pitch20",
                  w: mk([(1, 0.07, -0.07518, -0.02736), (2, -0.07, -0.07518, -0.02736), (3, 0, 0.09397, 0.0342),
                         (6, 0, 0.20673, 0.07524), (9, 0, 0.28191, 0.10261), (13, 0.08, 0.39467, 0.14365),
                         (14, -0.08, 0.39467, 0.14365)]),
-                 root: [0.17365, 0, 0, 0.98481], chest: [0.12279, 0.12279, -0.69636, 0.69636]),
+                 root: [0.17365, 0, 0, 0.98481], chest: [0.17364, 0, 0, 0.98481]),
             Case(n: "roll15bend",
                  w: mk([(1, 0.08832, -0.05916, 0), (2, -0.04691, -0.09539, 0), (3, -0.02588, 0.09659, 0),
                         (6, -0.05694, 0.2125, 0), (9, -0.07765, 0.28978, 0), (13, -0.03143, 0.42639, 0),
                         (14, -0.18598, 0.38498, 0)]),
-                 root: [0, 0, 0.13053, 0.99144], chest: [0, 0, -0.60876, 0.79335]),
+                 root: [0, 0, 0.13053, 0.99144], chest: [0, 0, 0.13052, 0.99145]),
         ]
         for c in cases {
             t.test("calc_root \(c.n) == PinoFBT oracle") {

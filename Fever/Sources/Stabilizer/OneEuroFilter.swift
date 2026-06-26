@@ -1,8 +1,14 @@
 import Foundation
 
-/// One-Euro filter — adaptive low-pass for jittery landmark streams.
+/// Generic scalar One-Euro filter — adaptive low-pass for jittery landmark streams.
 /// Reference: Casiez et al. 2012. Lower `minCutoff` = smoother, higher `beta`
 /// = more responsive to fast motion.
+///
+/// NOT the live smoother. The shipping pipeline smooths with
+/// `TwoEuroJointSmoother`, which reproduces PinoFBT 2.0's EXACT constants
+/// (speed exponent 2, beta 400). This struct uses the textbook formulation
+/// (exponent 1) and is kept only as a tested reference — do NOT wire it into the
+/// tracking path expecting PinoFBT parity; its output differs.
 public struct OneEuroFilter: Sendable {
     public var minCutoff: Float
     public var beta: Float
@@ -49,45 +55,5 @@ public struct OneEuroFilter: Sendable {
 
     public mutating func reset() {
         xPrev = nil; dxPrev = 0; tPrev = nil
-    }
-}
-
-/// Applies One-Euro to every coordinate of every landmark (33 × 3 = 99 filters).
-public final class LandmarkStabilizer {
-    private var fx: [OneEuroFilter]
-    private var fy: [OneEuroFilter]
-    private var fz: [OneEuroFilter]
-
-    /// Reused output buffer (single-worker confinement). Avoids a fresh
-    /// 33-element array allocation on every frame.
-    private var scratch: [NormalizedLandmark]
-
-    public init(count: Int = 33, minCutoff: Float, beta: Float) {
-        fx = Array(repeating: OneEuroFilter(minCutoff: minCutoff, beta: beta), count: count)
-        fy = Array(repeating: OneEuroFilter(minCutoff: minCutoff, beta: beta), count: count)
-        fz = Array(repeating: OneEuroFilter(minCutoff: minCutoff, beta: beta), count: count)
-        scratch = Array(repeating: NormalizedLandmark(position: .zero, visibility: 0, presence: 0),
-                        count: count)
-    }
-
-    public func stabilize(_ result: PoseResult) -> PoseResult {
-        let lms = result.landmarks
-        let t = result.timestamp
-        // Size the reused buffer to the input once (normally a no-op at 33).
-        if scratch.count != lms.count {
-            scratch = Array(repeating: NormalizedLandmark(position: .zero, visibility: 0, presence: 0),
-                            count: lms.count)
-        }
-        for i in lms.indices {
-            let lm = lms[i]
-            var p = lm.position
-            p.x = fx[i].filter(p.x, at: t)
-            p.y = fy[i].filter(p.y, at: t)
-            p.z = fz[i].filter(p.z, at: t)
-            scratch[i] = NormalizedLandmark(position: p,
-                                            visibility: lm.visibility,
-                                            presence: lm.presence)
-        }
-        return PoseResult(landmarks: scratch, timestamp: t)
     }
 }

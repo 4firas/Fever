@@ -51,6 +51,33 @@ public struct OSCMessage {
     }
 }
 
+/// An OSC bundle (`#bundle`) carrying a timetag and an ordered list of element
+/// packets, each length-prefixed with a big-endian int32 — the python-osc wire
+/// format PinoFBT emits (one bundle per frame, IMMEDIATELY timetag = 0x0…01).
+public struct OSCBundle {
+    public let elements: [OSCMessage]
+    /// 64-bit NTP timetag; the special value 1 means "immediately".
+    public let timetag: UInt64
+
+    public init(elements: [OSCMessage], timetag: UInt64 = 1) {
+        self.elements = elements
+        self.timetag = timetag
+    }
+
+    public func encoded() -> Data {
+        var data = Data()
+        data.append(contentsOf: Array("#bundle".utf8))
+        data.append(0)                              // NUL terminator → 8 bytes total ("#bundle\0")
+        withUnsafeBytes(of: timetag.bigEndian) { data.append(contentsOf: $0) }
+        for el in elements {
+            let bytes = el.encoded()
+            withUnsafeBytes(of: Int32(bytes.count).bigEndian) { data.append(contentsOf: $0) }
+            data.append(bytes)
+        }
+        return data
+    }
+}
+
 public enum OSCArgument {
     case float(Float)
     case int(Int32)

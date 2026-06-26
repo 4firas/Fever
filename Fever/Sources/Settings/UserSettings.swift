@@ -1,330 +1,214 @@
 import Foundation
 import Observation
-import SwiftUI
 
 /// All persistent, user-tunable tracking settings, observable by SwiftUI.
 ///
-/// REWORKED to the Observation framework (`@Observable`). Persistence is done
-/// manually against `UserDefaults` (the macro replaces `@AppStorage`, which is
-/// a property wrapper incompatible with `@Observable` stored properties).
+/// REWORKED to the Observation framework (`@Observable`). Persistence is manual
+/// against `UserDefaults` (the macro replaces `@AppStorage`, which is a property
+/// wrapper incompatible with `@Observable` stored properties).
 ///
-/// Numeric tunables are stored as `Double` (slider-friendly) and exposed to
-/// SIMD code via `Float`-suffixed computed mirrors (e.g. `jointSize` →
-/// `jointSizeF`).
+/// This is the BYTE-EXACT PinoFBT 2.0 port: the per-tracker solve is fixed (the
+/// reverse-engineered `PinoSolver`/`PinoKinematics`), so the only knobs that affect
+/// the live wire are the few below. Everything the old MediaPipe pipeline exposed
+/// (leveling, yaw stabilizer, per-joint enables, exaggeration gains, manual smoothing
+/// constants) is gone — the model + IK handle all of it.
 ///
-/// Defaults: OSC host 127.0.0.1, OSC port **9000**, user height **1.74 m**,
-/// enabled joints = ALL 8 numbered body trackers (hip, chest, l/r elbow,
-/// l/r knee, l/r foot). The head is the always-on position-only REFERENCE point
-/// (`sendHeadReference`), handled separately — not a numbered body tracker.
+/// Defaults: OSC 127.0.0.1:9000, height 1.74 m, mirror ON (the webcam shows the
+/// user mirrored), elbows OFF (clean 6-point), fps multiplier 7×.
 @Observable
 public final class TrackingConfig {
 
     // MARK: - Network / output
+
     public var oscHost: String {
         didSet { UserDefaults.standard.set(oscHost, forKey: Keys.oscHost) }
     }
+
+    public var oscPort: Int {
+        didSet {
+            // Clamp to the valid UDP port range so the GUI port field (which accepts
+            // any Int) can never push an out-of-range value down to `OSCSender` /
+            // `NWEndpoint.Port` (a UInt16 conversion that would trap). Re-assigning
+            // here re-enters didSet once with an in-range value (no-op).
+            let clamped = min(max(oscPort, 1), 65535)
+            if clamped != oscPort { oscPort = clamped; return }
+            UserDefaults.standard.set(oscPort, forKey: Keys.oscPort)
+        }
+    }
+
     /// Selected camera `uniqueID` ("" = auto: prefer an external camera).
     public var cameraDeviceID: String {
         didSet { UserDefaults.standard.set(cameraDeviceID, forKey: Keys.cameraDeviceID) }
     }
-    public var oscPort: Int {
-        didSet {
-            // Clamp to the valid UDP port range so the GUI port field (which
-            // accepts any Int) can never push an out-of-range value down to
-            // `OSCSender` / `NWEndpoint.Port` (a UInt16 conversion that would
-            // trap). Mirrors the CLI validation in FeverMain. Re-assigning
-            // here re-enters didSet once with an already-in-range value (no-op).
-            let clamped = min(max(oscPort, 1), 65535)
-            if clamped != oscPort {
-                oscPort = clamped
-                return
-            }
-            UserDefaults.standard.set(oscPort, forKey: Keys.oscPort)
-        }
-    }
-    public var enableTracker: Bool {
-        didSet { UserDefaults.standard.set(enableTracker, forKey: Keys.enableTracker) }
-    }
-    public var sendHeadReference: Bool {
-        didSet { UserDefaults.standard.set(sendHeadReference, forKey: Keys.sendHeadReference) }
-    }
-    /// Whether the OSC/tracker path negates X. DEFAULT **false** — VERIFIED by a
-    /// live OSC-wire capture diff against PinoFBT (the 1:1 benchmark).
-    ///
-    /// The net MediaPipe-world → VRChat position map is `diag(mirrorSignX, −1, −1)`.
-    /// PinoFBT outputs the anatomical-LEFT limb at NEGATIVE X (and it tracks
-    /// correctly in VRChat), so Fever must match that sign. Captured result:
-    ///   • mirror OFF (det +1): Fever left limb → −X  ✓ matches PinoFBT.
-    ///   • mirror ON  (det −1): Fever left limb → +X  ✗ mirrored.
-    /// The non-obvious reason the signs work out this way: the MediaPipe **Tasks
-    /// API** (Fever) emits world-landmark X with the OPPOSITE sign to the legacy
-    /// MediaPipe **GPU graph** that PinoFBT bundles — so even though PinoFBT's
-    /// binary negates X, Fever must NOT, to land on the same VRChat side. Affects
-    /// only the OSC CoordinateMapper, never the preview. User-toggleable safety hatch.
-    public var mirrorTracking: Bool {
-        didSet { UserDefaults.standard.set(mirrorTracking, forKey: Keys.mirrorTracking) }
-    }
-    /// Whether the left/right foot trackers are placed at the ANKLE landmark
-    /// (standard VRChat FBT). DEFAULT true. When false they use the synthesized
-    /// foot-index (toe) position.
-    public var footTrackersAtAnkle: Bool {
-        didSet { UserDefaults.standard.set(footTrackersAtAnkle, forKey: Keys.footTrackersAtAnkle) }
-    }
-    /// Whether to transmit `/rotation` for trackers. DEFAULT true now that the
-    /// rotation path is REBUILT (PinoFBT/ju1ce recipe): per-joint orientations are
-    /// derived from TWO in-body axes (no fabricated world-up roll / singularity),
-    /// feet use a locked-roll yaw+pitch frame, and everything is emitted REST-
-    /// RELATIVE (delta from the Recenter T-pose) so the wire is bounded and
-    /// zero-centered (euler ≈ 0 at rest) instead of the old large/wrapping values.
-    /// The old garbage-rotation reasons for keeping this off are resolved.
-    public var sendRotation: Bool {
-        didSet { UserDefaults.standard.set(sendRotation, forKey: Keys.sendRotation) }
-    }
-    /// Whether `/rotation` is streamed REST-RELATIVE (delta from the Recenter pose)
-    /// instead of ABSOLUTE world orientation. DEFAULT **false** (absolute).
-    ///
-    /// CORRECTED via PinoFBT live OSC capture: PinoFBT streams ABSOLUTE limb
-    /// orientations — at a neutral standing pose its elbows/knees carry real
-    /// non-zero euler (e.g. elbow ≈ (+30,·,−24)), NOT zeros. The old rest-relative
-    /// rebase captured a rest pose on Recenter and emitted `inverse(qRest)·qLive`,
-    /// which ZEROED every joint at the calibration pose — erasing real limb
-    /// orientation and making turns/limbs read wrong. VRChat does its own
-    /// tracker→bone calibration, so it expects absolute poses. Kept as a toggle for
-    /// experimentation, but absolute is the shipping default.
-    public var rotationRestRelative: Bool {
-        didSet { UserDefaults.standard.set(rotationRestRelative, forKey: Keys.rotationRestRelative) }
-    }
 
-    // MARK: - Body scale
+    // MARK: - Tracking
+
+    /// Real-world user height in meters → `PinoSolver` `user_height_ratio = cm/175`.
     public var userHeightMeters: Double {
         didSet { UserDefaults.standard.set(userHeightMeters, forKey: Keys.userHeightMeters) }
     }
 
-    // MARK: - Enabled trackers + fixed slot map
-    public var enabledJoints: Set<JointType> {
+    /// Reflect the SMPL skeleton left↔right (a PROPER reflection: swap L/R joints +
+    /// negate X) before the IK, converting the Mac webcam's mirrored handedness to
+    /// PinoFBT's capture handedness. DEFAULT true — the webcam shows you mirrored.
+    public var mirrorTracking: Bool {
+        didSet { UserDefaults.standard.set(mirrorTracking, forKey: Keys.mirrorTracking) }
+    }
+
+    /// Send the elbow trackers (slots 3/4). DEFAULT OFF → clean 6-point (chest, hip,
+    /// knees, ankles). A single webcam can't see arm depth well, so elbows are the
+    /// least reliable trackers (and VRChat recommends fewer trackers for stable IK).
+    public var sendElbows: Bool {
+        didSet { UserDefaults.standard.set(sendElbows, forKey: Keys.sendElbows) }
+    }
+
+    /// FPS-mux output multiplier (1–10×). OSC send rate = clamp(this × inferenceFPS,
+    /// inferenceFPS, 120 Hz). Higher = smoother, lower-latency stream (the predictor
+    /// fills the gap between inferences with forward-extrapolated sub-frames).
+    public var fpsMultiplier: Int {
+        didSet { UserDefaults.standard.set(fpsMultiplier, forKey: Keys.fpsMultiplier) }
+    }
+
+    // MARK: - Inference on PC (offload)
+
+    /// When ON, Fever does NOT run local inference: it wakes the GPU PC, launches
+    /// the headless byte-exact PinoFBT daemon there, and streams this Mac's camera
+    /// to it. The PC runs the model + IK and emits the VRChat OSC. `oscHost`/`oscPort`
+    /// become the PC's OSC TARGET (127.0.0.1 when VRChat runs on the PC via Quest
+    /// Link; the Quest's IP when it runs standalone).
+    public var inferenceOnPC: Bool {
+        didSet { UserDefaults.standard.set(inferenceOnPC, forKey: Keys.inferenceOnPC) }
+    }
+
+    /// GPU PC address (for SSH + the UDP video stream).
+    public var pcHost: String {
+        didSet { UserDefaults.standard.set(pcHost, forKey: Keys.pcHost) }
+    }
+
+    /// SSH user on the GPU PC (passwordless key auth).
+    public var pcUser: String {
+        didSet { UserDefaults.standard.set(pcUser, forKey: Keys.pcUser) }
+    }
+
+    /// GPU PC wired-NIC MAC for Wake-on-LAN (hex, ':'/'-' optional).
+    public var pcMAC: String {
+        didSet { UserDefaults.standard.set(pcMAC, forKey: Keys.pcMAC) }
+    }
+
+    // MARK: - Inference on PC — tracking + transport config (the 1:1 PinoFBT 2.0 defaults)
+
+    /// VRChat OSC target for PC mode — kept SEPARATE from the on-device `oscHost` so
+    /// switching modes never clobbers the other's destination. The PC sends here:
+    /// 127.0.0.1 = VRChat on the PC (Quest Link); the Quest's IP = standalone.
+    public var pcOscHost: String {
+        didSet { UserDefaults.standard.set(pcOscHost, forKey: Keys.pcOscHost) }
+    }
+    public var pcOscPort: Int {
         didSet {
-            UserDefaults.standard.set(enabledJoints.map(\.rawValue).joined(separator: ","),
-                              forKey: Keys.enabledJoints)
+            let c = min(max(pcOscPort, 1), 65535)
+            if c != pcOscPort { pcOscPort = c; return }
+            UserDefaults.standard.set(pcOscPort, forKey: Keys.pcOscPort)
         }
     }
 
-    /// Fixed VRChat numbered slot map. 1=hip, 2=leftFoot, 3=rightFoot (MVP) plus
-    /// optional 4..8. Head is handled separately as the alignment reference.
-    /// One body part per index, every frame (NO slot cycling).
-    public var slotMap: [JointType: String]
-
-    // MARK: - One-Euro / SLERP smoothing
-    public var stabilizerMinCutoff: Double {
-        didSet { UserDefaults.standard.set(stabilizerMinCutoff, forKey: Keys.stabilizerMinCutoff) }
-    }
-    public var stabilizerBeta: Double {
-        didSet { UserDefaults.standard.set(stabilizerBeta, forKey: Keys.stabilizerBeta) }
-    }
-    public var rotationSmoothing: Double {
-        didSet { UserDefaults.standard.set(rotationSmoothing, forKey: Keys.rotationSmoothing) }
+    /// 8-point trackers (elbows ON) — the PinoFBT 2.0 desktop default. ON for PC mode
+    /// (the GPU runs the full byte-exact arm solver, so elbows are first-class here).
+    public var pcSendElbows: Bool {
+        didSet { UserDefaults.standard.set(pcSendElbows, forKey: Keys.pcSendElbows) }
     }
 
-    // MARK: - Leveling / Body Stabilizer (PinoQuest-style gravity leveling)
-    /// Continuous re-leveling. When ON, the gravity-leveling datum is continuously
-    /// re-estimated and low-pass-filtered, tracking slow camera/posture drift; when
-    /// OFF, the datum frozen at the last Re-center is held (baseline leveling still
-    /// applies either way). DEFAULT false. Shown to the user as "Body Stabilizer".
-    public var bodyStabilizer: Bool {
-        didSet { UserDefaults.standard.set(bodyStabilizer, forKey: Keys.bodyStabilizer) }
-    }
-    /// Whether leveling also corrects camera ROLL (about the view axis), not just
-    /// pitch. DEFAULT false — a desk webcam is rarely rolled, and roll estimated from
-    /// a possibly-leaning user adds noise. Exposed for tilted / handheld rigs.
-    public var levelIncludeRoll: Bool {
-        didSet { UserDefaults.standard.set(levelIncludeRoll, forKey: Keys.levelIncludeRoll) }
-    }
-    /// YAW Body-Stabilizer (PinoFBT-style): derive ONE smoothed body-facing yaw
-    /// from the hip and impose it coherently on the torso (hip + chest), so the
-    /// body turns as one stable unit instead of each tracker's monocular yaw
-    /// jittering/flipping when you face away. DEFAULT false (opt-in) — it changes
-    /// the torso yaw, so it's off until validated in-headset; PinoFBT runs its
-    /// equivalent ON. See `YawStabilizer`.
-    public var yawStabilizer: Bool {
-        didSet { UserDefaults.standard.set(yawStabilizer, forKey: Keys.yawStabilizer) }
+    /// Horizontally mirror the camera before streaming — matches PinoFBT's internal
+    /// `cv2.flip` so handedness lands the same as the original desktop app.
+    public var pcFlipCamera: Bool {
+        didSet { UserDefaults.standard.set(pcFlipCamera, forKey: Keys.pcFlipCamera) }
     }
 
-    // MARK: - Body tweaks
-    public var jointSize: Double {
-        didSet { UserDefaults.standard.set(jointSize, forKey: Keys.jointSize) }
+    /// Mac→PC H.264 stream geometry / rate / bitrate.
+    public var pcStreamWidth: Int {
+        didSet { UserDefaults.standard.set(pcStreamWidth, forKey: Keys.pcStreamWidth) }
     }
-    /// HIP SWAY gain (lateral / X). Repurposed for the POSITION-only pipeline:
-    /// amplifies the hip tracker's side-to-side deviation from stance center
-    /// (ankle midpoint) by this factor so weight shifts read clearly in VR.
-    /// 1.0 = literal (no exaggeration); default 2.0; >3 looks like a caricature.
-    /// (Also still drives the optional rotation swing when `sendRotation` is on.)
-    public var hipExaggerateCoefficient: Double {
-        didSet { UserDefaults.standard.set(hipExaggerateCoefficient, forKey: Keys.hipExaggerateCoefficient) }
+    public var pcStreamHeight: Int {
+        didSet { UserDefaults.standard.set(pcStreamHeight, forKey: Keys.pcStreamHeight) }
     }
-    /// HIP LEAN gain (forward-back / Z). Repurposed for the POSITION-only
-    /// pipeline: amplifies the hip's forward/back deviation (lean / hip-lead) by
-    /// this factor. Kept LOWER than lateral because depth is Vision's weakest
-    /// axis. 1.0 = literal; default 1.4. (Also drives the optional rotation twist
-    /// when `sendRotation` is on.)
-    public var hipTwistCoefficient: Double {
-        didSet { UserDefaults.standard.set(hipTwistCoefficient, forKey: Keys.hipTwistCoefficient) }
+    public var pcStreamFPS: Int {
+        didSet { UserDefaults.standard.set(pcStreamFPS, forKey: Keys.pcStreamFPS) }
     }
-    public var hipLength: Double {
-        didSet { UserDefaults.standard.set(hipLength, forKey: Keys.hipLength) }
+    public var pcBitrateMbps: Int {
+        didSet { UserDefaults.standard.set(pcBitrateMbps, forKey: Keys.pcBitrateMbps) }
     }
-    public var kneePosition: Double {
-        didSet { UserDefaults.standard.set(kneePosition, forKey: Keys.kneePosition) }
+    /// Politeness for sharing the PC: run the daemon below-normal priority so a
+    /// person using the PC always gets the GPU/CPU first.
+    public var pcPoliteMode: Bool {
+        didSet { UserDefaults.standard.set(pcPoliteMode, forKey: Keys.pcPoliteMode) }
     }
-    /// STEP / STRIDE gain — amplifies a SWINGING foot's horizontal displacement
-    /// from its slow-EMA neutral rest position so steps / walking / dynamic leg
-    /// movement read bigger in VR. 1.0 = literal (no exaggeration); default 1.6.
-    /// Swing-gated (a planted foot is never exaggerated → stays glued to the
-    /// floor) and clamped so a spike can't throw the foot away.
-    public var stepStrideCoefficient: Double {
-        didSet { UserDefaults.standard.set(stepStrideCoefficient, forKey: Keys.stepStrideCoefficient) }
-    }
-    /// STEP LIFT gain — amplifies a SWINGING foot's UPWARD lift above the floor so
-    /// marches / high steps read bigger. Up-only (never pushes a planted foot down
-    /// through the floor). 1.0 = literal; default 1.3.
-    public var stepLiftCoefficient: Double {
-        didSet { UserDefaults.standard.set(stepLiftCoefficient, forKey: Keys.stepLiftCoefficient) }
+    /// Cap PC-side processing FPS (0 = unlimited; the stream rate is the practical
+    /// ceiling). Lower = lighter GPU load when sharing the PC.
+    public var pcFpsCap: Int {
+        didSet { UserDefaults.standard.set(pcFpsCap, forKey: Keys.pcFpsCap) }
     }
 
-    // MARK: - Float mirrors for SIMD math
-    public var userHeightMetersF: Float { Float(userHeightMeters) }
-    public var jointSizeF: Float { Float(jointSize) }
-    public var hipExaggerateCoefficientF: Float { Float(hipExaggerateCoefficient) }
-    public var hipTwistCoefficientF: Float { Float(hipTwistCoefficient) }
-    public var hipLengthF: Float { Float(hipLength) }
-    public var kneePositionF: Float { Float(kneePosition) }
-    public var stepStrideCoefficientF: Float { Float(stepStrideCoefficient) }
-    public var stepLiftCoefficientF: Float { Float(stepLiftCoefficient) }
-    public var stabilizerMinCutoffF: Float { Float(stabilizerMinCutoff) }
-    public var stabilizerBetaF: Float { Float(stabilizerBeta) }
-    public var rotationSmoothingF: Float { Float(rotationSmoothing) }
+    /// In PC mode, draw the skeleton overlay (sent back from the PC) over the live
+    /// camera preview. OFF = camera preview only. DEFAULT on.
+    public var pcShowSkeleton: Bool {
+        didSet { UserDefaults.standard.set(pcShowSkeleton, forKey: Keys.pcShowSkeleton) }
+    }
 
-    // MARK: - Init (loads persisted values; falls back to spec defaults)
+    // MARK: - Init (loads persisted values; falls back to defaults)
+
     public init() {
         let d = UserDefaults.standard
-
-        oscHost = (d.string(forKey: Keys.oscHost)) ?? "127.0.0.1"
-        cameraDeviceID = d.string(forKey: Keys.cameraDeviceID) ?? ""
+        oscHost = d.string(forKey: Keys.oscHost) ?? "127.0.0.1"
         oscPort = d.object(forKey: Keys.oscPort) as? Int ?? 9000
-        enableTracker = d.object(forKey: Keys.enableTracker) as? Bool ?? false
-        // DEFAULT false — An HMD user (Quest) already has an authoritative head; Fever's
-        // FABRICATED head (derived from shoulder/ear geometry) creates a SECOND head that
-        // fights the HMD, causing VRChat to fold the neck to reconcile the conflict
-        // (the 90° neck-fold bug). TrackingPipeline.swift:360-365 already documents
-        // PinoFBT streams /tracking/trackers/head/position continuously (wire-confirmed,
-        // findings §7) — it's the anchor VRChat re-origins the whole tracker space to.
-        // The NLF model emits ABSOLUTE camera-space positions, so WITHOUT this anchor the
-        // body lands metres off ("far away"). Force-enable (override any stale false pref).
-        sendHeadReference = true
-        // DEFAULT false — VERIFIED by live OSC capture diff against PinoFBT.
-        // KEY FINDING: the MediaPipe Tasks API (what Fever uses) emits world-landmark
-        // X with the OPPOSITE sign to the legacy GPU graph PinoFBT uses. PinoFBT
-        // (works in VRChat) outputs the anatomical-LEFT limb at NEGATIVE X. With
-        // mirror ON, Fever output left at +X (mirrored/wrong); with mirror OFF it
-        // outputs left at −X = matches PinoFBT. So mirror OFF is correct for the
-        // Tasks-API frame (negate Y,Z only, det +1). The earlier "mirror ON to match
-        // PinoFBT's binary signs" was wrong — it ignored the Tasks-API vs legacy-graph
-        // sign difference. (The real "L/R mangle" was broken chest/foot ROTATION, not
-        // position chirality — see rotationRestRelative / OSCSender.rotationSlots.)
-        // Force-true (override stale pref): the webcam shows the user mirrored, so the
-        // model's anatomical-left lands at +X (image-right) and would map to VRChat's
-        // right. A global X flip (mirrorX) restores correct L/R for legs, arms, hands.
-        mirrorTracking = true
-        footTrackersAtAnkle = d.object(forKey: Keys.footTrackersAtAnkle) as? Bool ?? true
-        // DEFAULT true — the rotation path is now REBUILT (two in-body axes, no
-        // world-up gauge/singularity; locked-roll feet; rest-relative delta from
-        // the Recenter T-pose → bounded, zero-centered euler like PinoFBT). The old
-        // garbage euler (full -180..180 wraps, stuck axis offsets) is gone, so we
-        // stream rotation by default; still user-toggleable for position-only.
-        sendRotation = d.object(forKey: Keys.sendRotation) as? Bool ?? true
-        // DEFAULT false = ABSOLUTE world rotation (PinoFBT ground truth, confirmed by
-        // live OSC capture). Rest-relative zeroed real limb orientation at the
-        // Recenter pose; absolute is what VRChat expects. See the property doc.
-        rotationRestRelative = d.object(forKey: Keys.rotationRestRelative) as? Bool ?? false
-
+        cameraDeviceID = d.string(forKey: Keys.cameraDeviceID) ?? ""
         userHeightMeters = d.object(forKey: Keys.userHeightMeters) as? Double ?? 1.74
-
-        if let raw = d.string(forKey: Keys.enabledJoints) {
-            enabledJoints = Set(raw.split(separator: ",")
-                .compactMap { JointType(rawValue: String($0)) })
-        } else {
-            // Default to all 8 numbered body trackers (head is the always-on
-            // position-only reference, handled separately).
-            enabledJoints = [.hip, .chest,
-                             .leftElbow, .rightElbow,
-                             .leftKnee, .rightKnee,
-                             .leftFoot, .rightFoot]
-        }
-
-        slotMap = [
-            .hip:        "1",
-            .leftFoot:   "2",
-            .rightFoot:  "3",
-            .chest:      "4",
-            .leftKnee:   "5",
-            .rightKnee:  "6",
-            .leftElbow:  "7",
-            .rightElbow: "8"
-        ]
-
-        stabilizerMinCutoff = d.object(forKey: Keys.stabilizerMinCutoff) as? Double ?? 1.0
-        stabilizerBeta = d.object(forKey: Keys.stabilizerBeta) as? Double ?? 0.007
-        rotationSmoothing = d.object(forKey: Keys.rotationSmoothing) as? Double ?? 0.5
-
-        bodyStabilizer = d.object(forKey: Keys.bodyStabilizer) as? Bool ?? false
-        levelIncludeRoll = d.object(forKey: Keys.levelIncludeRoll) as? Bool ?? false
-        yawStabilizer = d.object(forKey: Keys.yawStabilizer) as? Bool ?? false
-
-        jointSize = d.object(forKey: Keys.jointSize) as? Double ?? 1.0
-        // Tasteful out-of-the-box exaggeration: a bit of intentional liveliness,
-        // not zero (stiff) and not cartoonish. Lateral sway 2.0x, fwd/back 1.4x.
-        // These coefficients changed MEANING from rotation amounts (old range
-        // -1...1) to POSITION gains (range 1...3 / 1...2). Any persisted value
-        // below 1.0 is a stale rotation-era value (or the old 0.0 default) that
-        // would collapse the hip onto stance center, so clamp loads up to the
-        // tasteful default rather than honoring an inert old setting.
-        let loadedSway = d.object(forKey: Keys.hipExaggerateCoefficient) as? Double ?? 2.0
-        hipExaggerateCoefficient = loadedSway >= 1.0 ? loadedSway : 2.0
-        let loadedLean = d.object(forKey: Keys.hipTwistCoefficient) as? Double ?? 1.4
-        hipTwistCoefficient = loadedLean >= 1.0 ? loadedLean : 1.4
-        hipLength = d.object(forKey: Keys.hipLength) as? Double ?? 0.0
-        kneePosition = d.object(forKey: Keys.kneePosition) as? Double ?? 0.0
-        // Step exaggeration: same >=1.0 load clamp as the hip gains so a stale
-        // sub-1.0 persisted value can never collapse a foot onto its neutral.
-        let loadedStride = d.object(forKey: Keys.stepStrideCoefficient) as? Double ?? 1.6
-        stepStrideCoefficient = loadedStride >= 1.0 ? loadedStride : 1.6
-        let loadedLift = d.object(forKey: Keys.stepLiftCoefficient) as? Double ?? 1.3
-        stepLiftCoefficient = loadedLift >= 1.0 ? loadedLift : 1.3
+        mirrorTracking = d.object(forKey: Keys.mirrorTracking) as? Bool ?? true
+        sendElbows = d.object(forKey: Keys.sendElbows) as? Bool ?? false
+        fpsMultiplier = min(10, max(1, d.object(forKey: Keys.fpsMultiplier) as? Int ?? 7))
+        inferenceOnPC = d.object(forKey: Keys.inferenceOnPC) as? Bool ?? false
+        // No hardcoded host/user/MAC defaults: those are personal/network identifiers
+        // (this is a public repo) and the Start button is already gated on a blank
+        // host+MAC. A real value the user enters persists here in UserDefaults.
+        pcHost = d.string(forKey: Keys.pcHost) ?? ""
+        pcUser = d.string(forKey: Keys.pcUser) ?? ""
+        pcMAC = d.string(forKey: Keys.pcMAC) ?? ""
+        // PC mode = the 1:1 PinoFBT 2.0 config by default (8-point, mirrored, PCVR target).
+        pcOscHost = d.string(forKey: Keys.pcOscHost) ?? "127.0.0.1"
+        pcOscPort = d.object(forKey: Keys.pcOscPort) as? Int ?? 9000
+        pcSendElbows = d.object(forKey: Keys.pcSendElbows) as? Bool ?? true
+        pcFlipCamera = d.object(forKey: Keys.pcFlipCamera) as? Bool ?? true
+        pcStreamWidth = d.object(forKey: Keys.pcStreamWidth) as? Int ?? 1280
+        pcStreamHeight = d.object(forKey: Keys.pcStreamHeight) as? Int ?? 720
+        pcStreamFPS = d.object(forKey: Keys.pcStreamFPS) as? Int ?? 30
+        pcBitrateMbps = d.object(forKey: Keys.pcBitrateMbps) as? Int ?? 8
+        pcPoliteMode = d.object(forKey: Keys.pcPoliteMode) as? Bool ?? false
+        pcFpsCap = d.object(forKey: Keys.pcFpsCap) as? Int ?? 0
+        pcShowSkeleton = d.object(forKey: Keys.pcShowSkeleton) as? Bool ?? true
     }
 
     // MARK: - Persistence keys
+
     private enum Keys {
         static let oscHost = "oscHost"
-        static let cameraDeviceID = "cameraDeviceID"
         static let oscPort = "oscPort"
-        static let sendRotation = "sendRotation"
-        static let rotationRestRelative = "rotationRestRelative"
-        static let enableTracker = "enableTracker"
-        static let sendHeadReference = "sendHeadReference"
-        static let mirrorTracking = "mirrorTracking"
-        static let footTrackersAtAnkle = "footTrackersAtAnkle"
+        static let cameraDeviceID = "cameraDeviceID"
         static let userHeightMeters = "userHeightMeters"
-        static let enabledJoints = "enabledJoints"
-        static let stabilizerMinCutoff = "stabilizerMinCutoff"
-        static let stabilizerBeta = "stabilizerBeta"
-        static let rotationSmoothing = "rotationSmoothing"
-        static let bodyStabilizer = "bodyStabilizer"
-        static let levelIncludeRoll = "levelIncludeRoll"
-        static let yawStabilizer = "yawStabilizer"
-        static let jointSize = "jointSize"
-        static let hipExaggerateCoefficient = "hipExaggerateCoefficient"
-        static let hipTwistCoefficient = "hipTwistCoefficient"
-        static let hipLength = "hipLength"
-        static let kneePosition = "kneePosition"
-        static let stepStrideCoefficient = "stepStrideCoefficient"
-        static let stepLiftCoefficient = "stepLiftCoefficient"
+        static let mirrorTracking = "mirrorTracking"
+        static let sendElbows = "sendElbows"
+        static let fpsMultiplier = "fpsMultiplier"
+        static let inferenceOnPC = "inferenceOnPC"
+        static let pcHost = "pcHost"
+        static let pcUser = "pcUser"
+        static let pcMAC = "pcMAC"
+        static let pcOscHost = "pcOscHost"
+        static let pcOscPort = "pcOscPort"
+        static let pcSendElbows = "pcSendElbows"
+        static let pcFlipCamera = "pcFlipCamera"
+        static let pcStreamWidth = "pcStreamWidth"
+        static let pcStreamHeight = "pcStreamHeight"
+        static let pcStreamFPS = "pcStreamFPS"
+        static let pcBitrateMbps = "pcBitrateMbps"
+        static let pcPoliteMode = "pcPoliteMode"
+        static let pcFpsCap = "pcFpsCap"
+        static let pcShowSkeleton = "pcShowSkeleton"
     }
 }

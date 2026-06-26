@@ -35,3 +35,10 @@ Package.resources/
 .coreml_cache/
 **/.venv/
 *.coreml
+
+# Non-distributable reverse-engineered model IP + heavy local media (never commit)
+fbt_re/
+fever-media/
+*.pyd
+*.engine
+*.enc
