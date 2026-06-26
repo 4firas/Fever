@@ -171,6 +171,7 @@ public final class TrackingPipeline {
                                                  mirror: frame.mirror))
                 runtime.setFPS(frame.telemetry.fps)
                 runtime.setFpsMultiplier(frame.telemetry.fpsMultiplier)
+                runtime.setPredictionLeadMs(frame.telemetry.predictionLeadMs)
 
                 // Preview is for the human, not the tracker — cap it at the telemetry
                 // rate (12 Hz) so the costly full-res CGImage isn't built on inference
@@ -201,9 +202,9 @@ public final class TrackingPipeline {
 
         // FPS-MUX (LEADING predictor): upsample the low inference rate up to N× and
         // re-run the exact PinoSolver IK on every tick over a critically-damped
-        // follower of the latest smoothed joints, PLUS a small FIXED forward lead that
-        // anticipates motion. The lead is a constant horizon (≈0.5/fps, capped 0.06 s),
-        // NOT the snapshot's actual age — so this trims follow-delay while moving but
+        // follower of the latest smoothed joints, PLUS a forward lead that anticipates
+        // motion. The lead is a constant horizon (the user-tunable predictionLeadMs, in
+        // ms), NOT the snapshot's actual age — so this trims follow-delay while moving but
         // does not chase a stale pose during an inference stall. Rotations are re-derived
         // by the IK (no euler wrap); overshoot is bounded (capped lead + per-joint clamp).
         // This is the sole sender; the worker only stores the snapshot. Output rate =
@@ -242,9 +243,10 @@ public final class TrackingPipeline {
                 // forward LEAD that anticipates motion — it keeps fast moves crisp (not
                 // mushy) and shrinks the follow-delay while you're moving; the damping
                 // absorbs any direction-reversal overshoot, so it never rubberbands.
-                // Both scale with the inference period — tune the 0.7 / 0.5 factors.
+                // smoothTime scales with the inference period (tune the 0.7 factor); the
+                // lead is the user's predictionLeadMs (ms → s) — see UserSettings.
                 let smoothTime = Float(min(0.10, max(0.03, 0.7 / fps)))   // ~0.07 s at 10 fps
-                let lead = Float(min(0.06, max(0, 0.5 / fps)))            // ~0.05 s at 10 fps
+                let lead = Float(runtime.predictionLeadMs()) / 1000.0     // user-tunable forward-lead (ms → s)
                 let (body, head) = up.step(joints: snap.joints, velocity: snap.velocity,
                                            smoothTime: smoothTime, dt: Float(dt), lead: lead,
                                            tracked: snap.tracked,
@@ -341,6 +343,7 @@ private struct Telemetry: Sendable {
     let fps: Double
     let droppedFrames: Int
     let fpsMultiplier: Int
+    let predictionLeadMs: Int
 }
 private struct AssembledFrame: Sendable {
     let smoothedJoints: [SIMD3<Float>]
@@ -428,6 +431,9 @@ private final class RuntimeBox: @unchecked Sendable {
     private var _fpsMul: Int = 7
     func setFpsMultiplier(_ m: Int) { lock.withLock { _fpsMul = m } }
     func fpsMultiplier() -> Int { lock.withLock { _fpsMul } }
+    private var _leadMs: Int = 50
+    func setPredictionLeadMs(_ m: Int) { lock.withLock { _leadMs = m } }
+    func predictionLeadMs() -> Int { lock.withLock { _leadMs } }
 }
 
 private final class DropCounter: @unchecked Sendable {
@@ -577,6 +583,7 @@ private final class FrameProcessor: @unchecked Sendable {
                               heightCm: heightCm, sendElbows: elbows, mirror: mirror, liveTrackers: live,
                               preview: pose.normalizedPoints(),
                               telemetry: Telemetry(fps: measuredFPS, droppedFrames: droppedFrames,
-                                                   fpsMultiplier: cfg.fpsMultiplier))
+                                                   fpsMultiplier: cfg.fpsMultiplier,
+                                                   predictionLeadMs: cfg.predictionLeadMs))
     }
 }

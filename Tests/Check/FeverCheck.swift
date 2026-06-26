@@ -27,6 +27,27 @@ struct FeverCheck {
             exit(ok ? 0 : 1)
         }
 
+        // CROSS-LANGUAGE EQUIVALENCE HARNESS (on-device vs PC daemon). Reads a JSON file
+        // of raw model joint sets, runs the on-device solve / smoother, and writes the
+        // results as JSON so the Python daemon port can be diffed against it byte-for-byte.
+        //   --solve-dump <in.json> <out.json>     in: [[[x,y,z]×24], …]  out: [{slots,head}, …]
+        //   --smoother-dump <in.json> <out.json>  in: [{t,j:[[x,y,z]×24]}, …]  out: [{sm,vel}, …]
+        if let i = CommandLine.arguments.firstIndex(of: "--solve-dump"),
+           i + 2 < CommandLine.arguments.count {
+            EquivalenceDump.solve(in: CommandLine.arguments[i + 1], out: CommandLine.arguments[i + 2])
+            exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--smoother-dump"),
+           i + 2 < CommandLine.arguments.count {
+            EquivalenceDump.smoother(in: CommandLine.arguments[i + 1], out: CommandLine.arguments[i + 2])
+            exit(0)
+        }
+        if let i = CommandLine.arguments.firstIndex(of: "--upsampler-dump"),
+           i + 2 < CommandLine.arguments.count {
+            EquivalenceDump.upsampler(in: CommandLine.arguments[i + 1], out: CommandLine.arguments[i + 2])
+            exit(0)
+        }
+
         let t = TestRunner()
 
         // Inline unit tests (live path).
@@ -46,6 +67,8 @@ struct FeverCheck {
         PredictiveUpsamplerTests.run(t)
         WireParityTests.run(t)
         ConfigPersistenceTests.run(t)
+        PCOscRouteTests.run(t)
+        PCModelLaunchTests.run(t)
 
         let summary = t.finalSummary()
         print(summary)

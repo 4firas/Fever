@@ -29,7 +29,6 @@ final class PCCameraStreamer: @unchecked Sendable {
     private let host: String
     private let port: Int
     private let outW: Int, outH: Int, fps: Int, bitrateMbps: Int
-    private let flip: Bool
     private let onExit: @Sendable (Int32) -> Void
 
     private let writeQueue = DispatchQueue(label: "com.fir4s.fever.pc.stream", qos: .userInitiated)
@@ -42,15 +41,24 @@ final class PCCameraStreamer: @unchecked Sendable {
     private var camW = 0, camH = 0          // pinned from the FIRST frame
     private var packBuffer = Data()         // reused on the writer queue (no per-frame malloc)
     private var lastFeedUptime: TimeInterval = 0   // wall-clock of the last accepted frame
+    // ── Self-heal: a transient blip (PC waking, USB-LAN flap, network reshuffle) makes
+    // ffmpeg die on a UDP "No route to host". We relaunch it on the next frame instead of
+    // stranding the whole stream — but only escalate to onExit (fatal) if it keeps dying
+    // fast (a genuinely broken encoder/args), so a real failure still surfaces. None of
+    // this touches the hot path; it only runs on an unexpected exit.
+    private var lastLaunchUptime: TimeInterval = 0 // when the current ffmpeg was launched
+    private var rapidFails = 0                      // consecutive deaths within ~1s of launch
+    private let maxRapidFails = 8                   // give up after this many → onExit(fatal)
+    private var gaveUp = false                      // fatal: stop relaunching
 
     /// - outW/outH/fps: the ENCODED stream size/rate (ffmpeg scales/resamples).
     /// ffmpeg's input geometry is taken from the first camera frame, not assumed.
     init(ffmpegPath: String, host: String, port: Int,
-         outW: Int, outH: Int, fps: Int, bitrateMbps: Int, flip: Bool,
+         outW: Int, outH: Int, fps: Int, bitrateMbps: Int,
          onExit: @escaping @Sendable (Int32) -> Void) {
         self.ffmpegPath = ffmpegPath; self.host = host; self.port = port
         self.outW = outW; self.outH = outH; self.fps = fps
-        self.bitrateMbps = bitrateMbps; self.flip = flip; self.onExit = onExit
+        self.bitrateMbps = bitrateMbps; self.onExit = onExit
         startWriter()
     }
 
@@ -73,7 +81,13 @@ final class PCCameraStreamer: @unchecked Sendable {
         let w = CVPixelBufferGetWidth(pb), h = CVPixelBufferGetHeight(pb)
         let stored: Bool = lock.withLock {
             guard running else { return false }
-            if ffmpeg == nil { launchLocked(camW: w, camH: h) }
+            // (Re)launch ffmpeg lazily: first frame, or a self-heal after an unexpected
+            // death. Back off ~0.3s between relaunch attempts so a hard-failing encoder
+            // can't spin, and never relaunch once we've given up (fatal, onExit fired).
+            if ffmpeg == nil, !gaveUp,
+               lastLaunchUptime == 0 || ProcessInfo.processInfo.systemUptime - lastLaunchUptime >= 0.3 {
+                launchLocked(camW: w, camH: h)
+            }
             // Ignore a mid-stream resolution change (a fixed rawvideo size can't follow it).
             guard w == camW, h == camH else { return false }
             latestPB = pb
@@ -86,8 +100,12 @@ final class PCCameraStreamer: @unchecked Sendable {
     /// Build + launch ffmpeg with the real input geometry. Called under `lock`.
     private func launchLocked(camW: Int, camH: Int) {
         self.camW = camW; self.camH = camH
-        var vf = "scale=\(outW):\(outH),fps=\(fps)"
-        if flip { vf = "hflip,\(vf)" }                    // PinoFBT cv2.flip parity
+        // Stream the camera RAW (no hflip): the handedness is the PROPER L/R skeleton
+        // mirror applied on the PC (matching on-device mirrorTracking), so the model
+        // must see the true camera, not an improperly-reflected image.
+        // No `fps` filter: it buffers a frame to force CFR, and the input is already paced by
+        // the camera. Just scale (a no-op when the stream size == camera size). Measured ~25ms saved.
+        let vf = "scale=\(outW):\(outH)"
 
         let p = Process()
         p.executableURL = URL(fileURLWithPath: ffmpegPath)
@@ -99,13 +117,21 @@ final class PCCameraStreamer: @unchecked Sendable {
             "-i", "-",
             "-an",                                        // no audio track
             "-vf", vf,
-            "-c:v", "h264_videotoolbox", "-realtime", "1",
-            "-b:v", "\(bitrateMbps)M",
-            "-g", "\(max(1, fps / 2))", "-bf", "0", "-pix_fmt", "yuv420p",
+            // MJPEG (intra-frame) instead of H.264: H.264 is inter-frame, so it pipelines
+            // ~3 frames (GOP/reorder/decode) = ~100ms of unavoidable latency. MJPEG encodes
+            // each frame independently — no pipeline. Measured Mac→PC transport: VideoToolbox
+            // ~324ms → x264 ~150ms → MJPEG ~99ms p50 / 49ms min (the floor is now the 30fps
+            // frame period itself). q:v 5 is high quality; the model only needs a 256px crop.
+            // Tradeoff: MJPEG is more sensitive to UDP packet loss (a frame = many packets, any
+            // loss drops that frame) — fine on a clean 5GHz/wired LAN; the daemon discards
+            // corrupt frames and the 120Hz upsampler smooths the gaps.
+            "-c:v", "mjpeg", "-q:v", "5", "-pix_fmt", "yuvj420p",
             // Push each packet out immediately instead of letting the mpegts muxer
             // accumulate — shaves buffering latency off the Mac→PC hop.
             "-flush_packets", "1", "-muxdelay", "0", "-muxpreload", "0",
-            "-f", "mpegts", "udp://\(host):\(port)?pkt_size=1316"
+            // NUT container: low-overhead, carries MJPEG (mpegts can't). The daemon's av.open
+            // auto-detects it, so no daemon change is needed.
+            "-f", "nut", "udp://\(host):\(port)?pkt_size=1316"
         ]
         let inPipe = Pipe()
         p.standardInput = inPipe
@@ -113,7 +139,22 @@ final class PCCameraStreamer: @unchecked Sendable {
         let logPath = (NSTemporaryDirectory() as NSString).appendingPathComponent("fever_pc_stream.log")
         FileManager.default.createFile(atPath: logPath, contents: nil)
         p.standardError = FileHandle(forWritingAtPath: logPath) ?? FileHandle.nullDevice
-        p.terminationHandler = { [onExit] proc in onExit(proc.terminationStatus) }
+        // Self-heal on an UNEXPECTED ffmpeg death (e.g. UDP "No route to host" from a
+        // network blip): drop the dead process so the next frame relaunches it, and only
+        // escalate to onExit if it keeps dying within ~1s of launch (a real broken encoder).
+        p.terminationHandler = { [weak self] proc in
+            guard let self else { return }
+            let escalate: Int32? = self.lock.withLock {
+                guard self.running else { return nil }          // user stop() → silent, no relaunch
+                guard proc === self.ffmpeg else { return nil }   // already superseded by a relaunch
+                self.ffmpeg = nil; self.stdin = nil              // park the writer; next feed relaunches
+                let now = ProcessInfo.processInfo.systemUptime
+                self.rapidFails = (now - self.lastLaunchUptime < 1.0) ? self.rapidFails + 1 : 0
+                if self.rapidFails >= self.maxRapidFails { self.gaveUp = true; return proc.terminationStatus }
+                return nil                                       // transient → relaunch on next frame
+            }
+            if let code = escalate { self.onExit(code) }
+        }
         do { try p.run() } catch { onExit(-1); return }
         let wfh = inPipe.fileHandleForWriting
         // Without this, a write after ffmpeg closes the read-end raises SIGPIPE,
@@ -122,6 +163,7 @@ final class PCCameraStreamer: @unchecked Sendable {
         _ = fcntl(wfh.fileDescriptor, F_SETNOSIGPIPE, 1)
         self.ffmpeg = p
         self.stdin = wfh
+        self.lastLaunchUptime = ProcessInfo.processInfo.systemUptime
     }
 
     private func startWriter() {
@@ -142,7 +184,17 @@ final class PCCameraStreamer: @unchecked Sendable {
                 guard let pb, let fh else { continue }    // spurious wake / ffmpeg not up yet
                 guard let data = self.packLatest(pb) else { continue }
                 do { try fh.write(contentsOf: data) }
-                catch { break }                           // ffmpeg closed the pipe → done
+                catch {
+                    // ffmpeg's pipe broke (it died, or is mid-relaunch). Drop the dead
+                    // handle and ensure it's torn down so the terminationHandler runs and
+                    // the next frame relaunches it — do NOT kill the writer (that's what
+                    // used to strand the whole stream on a transient network blip).
+                    let dead: Process? = lock.withLock {
+                        if self.stdin === fh { self.stdin = nil }
+                        return self.ffmpeg
+                    }
+                    if let dead, dead.isRunning { dead.terminate() }
+                }
             }
         }
     }

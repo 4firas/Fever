@@ -123,6 +123,7 @@ struct ContentView: View {
             // same bounds, so the skeleton lands on the body. The preview shows a
             // clear placeholder (not a black void) when there is no live feed.
             CameraPreview(session: previewSession,
+                          camera: camera,
                           authorized: previewAuthorized,
                           running: liveStatus.running,
                           startHint: config.inferenceOnPC
@@ -330,16 +331,29 @@ private struct ControlBar: View {
     private func makePCConfig() -> PCOffloadConfig {
         let camName: String? = config.cameraDeviceID.isEmpty ? nil
             : CameraCapture.availableCameras().first { $0.uniqueID == config.cameraDeviceID }?.localizedName
+        // Never stream faster than we capture: the camera is capped at cameraMaxFPS
+        // (default 30), so encoding at a higher pcStreamFPS would only duplicate frames
+        // and add latency. Clamp the effective stream rate to the capture cap.
+        let streamFPS = min(config.pcStreamFPS, config.cameraMaxFPS)
         return PCOffloadConfig.make(
             host: config.pcHost, user: config.pcUser, mac: config.pcMAC,
+            model: config.pcModel == "gvhmr" ? .gvhmr : .nlf,
             oscIP: config.pcOscHost, oscPort: config.pcOscPort,
+            relayViaMac: config.pcOscRelayViaMac, relayPort: 9001,
             heightCm: Int((config.userHeightMeters * 100).rounded()),
-            sendElbows: config.pcSendElbows, flip: config.pcFlipCamera,
+            // ONE handedness setting for both modes: PC NLF applies the SAME proper L/R
+            // skeleton mirror as on-device, so they track 1:1 (was a separate pcFlipCamera).
+            sendElbows: config.pcSendElbows, mirror: config.mirrorTracking,
+            predictionLeadMs: config.predictionLeadMs,
+            gvhmrK: config.gvhmrK, gvhmrMirror: config.gvhmrMirror,
+            gvhmrFlipX: config.gvhmrFlipX, gvhmrMoving: config.gvhmrMoving,
+            gvhmrFootContact: config.gvhmrFootContact, gvhmrNativeRot: config.gvhmrNativeRot,
             streamW: config.pcStreamWidth, streamH: config.pcStreamHeight,
-            streamFPS: config.pcStreamFPS, bitrateMbps: config.pcBitrateMbps,
+            streamFPS: streamFPS, bitrateMbps: config.pcBitrateMbps,
             politeMode: config.pcPoliteMode, fpsCap: config.pcFpsCap,
             // Pinned: the daemon listens on 5000 and only 5000 is opened in the PC
             // firewall, so the stream target must stay 5000 (no user-facing port knob).
+            // The OSC relay port (9001) is local to the Mac, only used in Relay route.
             streamPort: 5000, cameraName: camName)
     }
 }

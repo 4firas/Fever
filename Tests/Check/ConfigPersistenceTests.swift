@@ -26,5 +26,15 @@ enum ConfigPersistenceTests {
                     "oscPort must persist to UserDefaults; reloaded = \(reloaded.oscPort)")
             UserDefaults.standard.removeObject(forKey: "oscPort")
         }
+
+        t.test("pcOscRelayViaMac defaults to Direct (false) and persists when set") {
+            UserDefaults.standard.removeObject(forKey: "pcOscRelayViaMac")
+            t.check(TrackingConfig().pcOscRelayViaMac == false, "OSC route defaults to Direct")
+            let cfg = TrackingConfig()
+            cfg.pcOscRelayViaMac = true
+            t.check(TrackingConfig().pcOscRelayViaMac == true,
+                    "relay-via-Mac route must persist to UserDefaults")
+            UserDefaults.standard.removeObject(forKey: "pcOscRelayViaMac")
+        }
     }
 }

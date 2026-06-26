@@ -100,9 +100,10 @@ PLIST
 printf 'APPL????' > "${CONTENTS}/PkgInfo"
 
 # NOTE: Fever runs the NLF pose model through an EXTERNAL onnxruntime sidecar
-# (resolved at runtime from $FEVER_NLF_ROOT, default ~/Dev/BodyPose3DDemo). The
-# model is non-distributable, so nothing is embedded in the .app — there is no
-# bundled Python/sidecar to stage or sign.
+# (resolved at runtime from $FEVER_NLF_ROOT, default
+# ~/Documents/Projects/Fever/nlf-runtime). The model is non-distributable, so
+# nothing is embedded in the .app — there is no bundled Python/sidecar to stage
+# or sign.
 
 # --- 5b. Strip extended attributes -------------------------------------------
 # Finder/Spotlight can attach a com.apple.FinderInfo (and other) xattrs to the

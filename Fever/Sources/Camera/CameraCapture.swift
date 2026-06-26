@@ -37,14 +37,25 @@ public enum CameraAuthorization: Sendable, Equatable {
 /// replacement keep at most one buffer alive outside the pool at a time.
 public final class CameraCapture: NSObject, FrameSource {
 
-    /// Capture frame rate. Deliberately run the camera FASTER than the model infers
+    /// Default capture frame-rate cap (fps). 30 by default — smooth, light, and plenty
+    /// for body pose, and it keeps a GoPro/Continuity/UVC cam from spinning the capture
+    /// graph (and the PC stream) faster than we need. Overridable per-session via the
+    /// `maxFPS` property (driven by `TrackingConfig.cameraMaxFPS`).
+    public static let defaultCaptureFPS: CMTimeScale = 30
+
+    /// Capture frame-rate cap (fps). The camera runs FASTER than the model infers
     /// (~10–15 fps): the inference worker pulls latest-only, so a higher capture rate
     /// means the next inference always starts from a FRESHER frame — which cuts the
-    /// IRL→VR latency floor (frame age) roughly in half vs matching the inference rate.
-    /// 30 fps is universally supported and adds negligible cost (the extra frames are
-    /// skipped, never inferred). Preview still advances at the inference rate (the
-    /// worker renders the exact frame it ran on), so the skeleton stays glued on.
-    public static let captureFPS: CMTimeScale = 30
+    /// IRL→VR latency floor (frame age). `applyFrameRate` clamps this target into
+    /// whatever the device actually supports (a value outside the device's real ranges
+    /// would abort the process), so any camera — built-in, GoPro, Continuity, UVC — is
+    /// pinned to at most `maxFPS`. DEFAULT 30 (`defaultCaptureFPS`); set from
+    /// `TrackingConfig.cameraMaxFPS` before/while running via `setMaxFPS(_:)`.
+    public var maxFPS: CMTimeScale {
+        get { lock.withLock { _maxFPS } }
+        set { lock.withLock { _maxFPS = newValue } }
+    }
+    private var _maxFPS: CMTimeScale = CameraCapture.defaultCaptureFPS
 
     /// The underlying session. Exposed so a SwiftUI `AVCaptureVideoPreviewLayer`
     /// can attach to it for the full-bleed live preview, per the shared contract.
@@ -61,7 +72,7 @@ public final class CameraCapture: NSObject, FrameSource {
     private let videoOutput = AVCaptureVideoDataOutput()
 
     /// Preferred camera `uniqueID` (e.g. a GoPro/USB webcam chosen in Settings).
-    /// nil → auto-pick: prefer an external camera over the built-in. Set before start.
+    /// nil → auto-pick the BUILT-IN camera (lowest latency). Set before start to force one.
     public var preferredDeviceID: String?
 
     /// All connected video cameras (built-in + external/USB/Continuity), for the
@@ -98,13 +109,17 @@ public final class CameraCapture: NSObject, FrameSource {
         nc.addObserver(forName: AVCaptureDevice.wasDisconnectedNotification, object: nil, queue: nil, using: clear)
     }
 
-    /// Choose the capture device: the explicitly-preferred one if connected, else
-    /// the first external camera (GoPro/USB), else the system default.
+    /// Choose the capture device: the explicitly-preferred one if connected, else the
+    /// BUILT-IN camera. External/virtual cams (OBS Virtual, Continuity, action-cam webcam
+    /// bridges) register as `.external` but are higher-latency or simply wrong for tracking
+    /// — measured: a GoPro in webcam mode is ~430ms glass→frame vs the built-in's ~60–100ms.
+    /// So auto-pick the built-in and only use an external when the user picks it in Settings.
     private func pickDevice() -> AVCaptureDevice? {
         let cams = Self.availableCameras()
         if let id = preferredDeviceID, let d = cams.first(where: { $0.uniqueID == id }) { return d }
-        if let ext = cams.first(where: { $0.deviceType == .external }) { return ext }
-        return AVCaptureDevice.default(for: .video) ?? cams.first
+        return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .unspecified)
+            ?? AVCaptureDevice.default(for: .video)
+            ?? cams.first
     }
 
     /// Legacy frame sink (FrameSource protocol). Retained for compatibility; in
@@ -248,6 +263,44 @@ public final class CameraCapture: NSObject, FrameSource {
         }
     }
 
+    /// Bind a preview layer to this camera's session ON the session queue, so the
+    /// (session-mutating) `layer.session =` assignment serializes with `startRunning()` /
+    /// `stopRunning()`.
+    ///
+    /// CRITICAL: `AVCaptureSession` is not safe to mutate from one thread while another
+    /// enumerates it. `AVCaptureVideoPreviewLayer.session = …` internally does
+    /// `addVideoPreviewLayer:` → `commitConfiguration` (a session mutation). If that runs on
+    /// the main thread at the same moment `startRunning()` enumerates the session's
+    /// connections on the session queue, the process ABORTS with
+    /// `__NSFastEnumerationMutationHandler` ("collection mutated while being enumerated").
+    /// That exact race aborted on-device Start. The layer is created/configured (gravity,
+    /// frame, mirror transform) on the main thread by the caller — only the session bind,
+    /// the one operation that touches the session, is deferred onto this queue.
+    public func attachPreview(_ layer: AVCaptureVideoPreviewLayer, to session: AVCaptureSession) {
+        // Both are non-Sendable AVFoundation objects; this hop deliberately serializes
+        // their use with the rest of the session's lifecycle on `sessionQueue`.
+        nonisolated(unsafe) let lyr = layer
+        nonisolated(unsafe) let sess = session
+        sessionQueue.async {
+            if lyr.session !== sess { lyr.session = sess }
+        }
+    }
+
+    /// Unbind a preview layer from this session on the session queue, BEFORE the layer is
+    /// deallocated. `layer.session = nil` runs `removeVideoPreviewLayer:`, which cleanly
+    /// tears the layer's `CAImageQueue` out of the capture graph. Without it, dismantling the
+    /// SwiftUI preview (a mode switch / `session`-change / Stop) frees the layer while the
+    /// session still references its image queue, and the next `stopRunning()` SEGFAULTS in
+    /// `CAImageQueueInvalidate` — especially with an external GoPro/virtual camera, whose CMIO
+    /// graph teardown is fragile. The async closure retains `layer` until the unbind runs, so
+    /// the layer can't deallocate mid-detach; serialized on `sessionQueue` with start/stop.
+    public func detachPreview(_ layer: AVCaptureVideoPreviewLayer) {
+        nonisolated(unsafe) let lyr = layer
+        sessionQueue.async {
+            if lyr.session != nil { lyr.session = nil }
+        }
+    }
+
     // MARK: - Mailbox API (consumed by the inference worker)
 
     /// Pull the latest unconsumed frame, clearing the mailbox. Returns `nil`
@@ -304,10 +357,11 @@ public final class CameraCapture: NSObject, FrameSource {
         // throttling once pinned the pipeline to ~17fps). We do NOT touch
         // activeFormat (the preset already gives 720p and changing the format
         // manually breaks frame delivery on this SDK); we only pin the frame
-        // duration. Capture runs at `captureFPS` (30) — FASTER than the model
-        // infers — so the latest-only worker always grabs the freshest frame and
-        // the IRL→VR latency floor is minimized.
+        // duration. Capture is capped at `maxFPS` (default 30) — still FASTER than
+        // the model infers — so the latest-only worker always grabs the freshest
+        // frame and the IRL→VR latency floor is minimized.
         applyFrameRate(to: device)
+        minimizeLatencyEffects(on: device)
 
         videoOutput.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
@@ -325,12 +379,12 @@ public final class CameraCapture: NSObject, FrameSource {
         lock.withLock { isConfigured = true }
     }
 
-    /// Pin the capture device toward `captureFPS`, but ONLY to a frame duration the
-    /// device's active format actually supports. Setting `activeVideoMin/MaxFrameDuration`
-    /// to a value outside `videoSupportedFrameRateRanges` throws an UNCATCHABLE ObjC
+    /// Pin the capture device toward `maxFPS`, but ONLY to a frame duration the device's
+    /// active format actually supports. Setting `activeVideoMin/MaxFrameDuration` to a
+    /// value outside `videoSupportedFrameRateRanges` throws an UNCATCHABLE ObjC
     /// `NSException` → the process aborts. Virtual/DAL cameras (DroidCam, OBS,
     /// Continuity) and many external webcams cap below 30, so we clamp our desired
-    /// 1/30 into the device's real CMTime bounds (and skip entirely if it advertises
+    /// 1/maxFPS into the device's real CMTime bounds (and skip entirely if it advertises
     /// no ranges, letting the device run free).
     private func applyFrameRate(to device: AVCaptureDevice) {
         guard (try? device.lockForConfiguration()) != nil else { return }
@@ -342,17 +396,50 @@ public final class CameraCapture: NSObject, FrameSource {
             return   // device exposes no frame-rate control → leave it alone
         }
 
-        // Desired = 1/captureFPS, clamped into [minFrameDuration, maxFrameDuration]
-        // using the device's EXACT CMTime bounds (so the value is always in-range and
-        // can never trigger the exception). minFrameDuration = the SHORTEST duration =
-        // the fastest fps the device supports.
-        var duration = CMTime(value: 1, timescale: CameraCapture.captureFPS)
+        // Desired = 1/maxFPS, clamped into [minFrameDuration, maxFrameDuration] using the
+        // device's EXACT CMTime bounds (so the value is always in-range and can never
+        // trigger the exception). minFrameDuration = the SHORTEST duration = the FASTEST
+        // fps the device supports — so clamping our (longer) 1/30 against it caps the cam
+        // at 30 even when it can do 60+, while never asking for more than it can deliver.
+        var duration = CMTime(value: 1, timescale: max(1, maxFPS))
         if CMTimeCompare(duration, range.minFrameDuration) < 0 { duration = range.minFrameDuration }
         if CMTimeCompare(duration, range.maxFrameDuration) > 0 { duration = range.maxFrameDuration }
         guard duration.isValid, duration.isNumeric else { return }
 
         device.activeVideoMinFrameDuration = duration
         device.activeVideoMaxFrameDuration = duration
+    }
+
+    /// Kill the macOS camera "video effects" that add per-frame processing latency.
+    /// On Apple-silicon built-in cameras these run on the live feed and are the main
+    /// controllable latency adder (the 30fps frame period is fixed — the sensor has no
+    /// faster format). Center Stage reframes/crops through an extra pass: we take APP
+    /// control of it and force it OFF so the system can't silently re-enable it for
+    /// tracking. Reactions runs continuous hand-gesture detection on every frame but is
+    /// system-owned (no app setter) — we can only detect it and tell the user to turn it
+    /// off in Control Center ▸ Video Effects, which is a real latency win when it's on.
+    private func minimizeLatencyEffects(on device: AVCaptureDevice) {
+        if device.activeFormat.isCenterStageSupported {
+            AVCaptureDevice.centerStageControlMode = .app
+            AVCaptureDevice.isCenterStageEnabled = false
+        }
+        if #available(macOS 14.0, *), AVCaptureDevice.reactionEffectsEnabled {
+            NSLog("[Fever camera] ⚠︎ Reactions video-effect is ON — it runs per-frame gesture "
+                + "detection and adds latency. Turn it OFF in Control Center ▸ Video Effects for lowest lag.")
+        }
+    }
+
+    /// Update the capture frame-rate cap and re-apply it to the live device (if the
+    /// session is already configured), so a Settings change takes effect without a
+    /// restart. Serialized on the session queue alongside the other session mutations.
+    public func setMaxFPS(_ fps: Int) {
+        let ts = CMTimeScale(min(240, max(1, fps)))
+        nonisolated(unsafe) let capture = self
+        sessionQueue.async {
+            capture.maxFPS = ts
+            guard capture.lock.withLock({ capture.isConfigured }), let device = capture.pickDevice() else { return }
+            capture.applyFrameRate(to: device)
+        }
     }
 
     /// Switch the active camera live (Settings picker). Swaps the session's video

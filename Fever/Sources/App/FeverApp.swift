@@ -57,6 +57,9 @@ struct FeverApp: App {
         _pipeline = State(initialValue: pipeline)
         self.camera = camera
         camera.preferredDeviceID = config.cameraDeviceID.isEmpty ? nil : config.cameraDeviceID
+        // Cap the capture frame rate (default 30) before the session ever starts, so
+        // both the on-device pipeline and PC-mode streaming share the same clamp.
+        camera.maxFPS = CMTimeScale(config.cameraMaxFPS)
         // Hand the controller to the AppKit termination hook (see FeverAppDelegate).
         AppShutdown.controller = _controller.wrappedValue
         Self.installTerminationSignalHandlers()
@@ -209,7 +212,14 @@ struct OnDeviceSettings: View {
                         Text(cam.localizedName).tag(cam.uniqueID)
                     }
                 }
-                Text("Pick your GoPro/USB webcam. Takes effect immediately; Auto prefers an external camera over the built-in.")
+                Picker("Capture FPS", selection: Binding(
+                    get: { config.cameraMaxFPS },
+                    set: { config.cameraMaxFPS = $0; camera.setMaxFPS($0) })) {
+                    Text("24").tag(24)
+                    Text("30").tag(30)
+                    Text("60").tag(60)
+                }
+                Text("Pick your GoPro/USB webcam. Takes effect immediately; Auto prefers an external camera over the built-in. Capture FPS caps the camera frame rate for BOTH modes (default 30 — smooth and light); PC streaming never exceeds it.")
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
             }
@@ -233,7 +243,7 @@ struct OnDeviceSettings: View {
             Section {
                 Toggle("Swap tracker handedness (L/R)", isOn: $config.mirrorTracking)
             } footer: {
-                Text("Flips the tracker handedness if your avatar appears left-right reversed in VRChat. Affects only the OSC trackers, not the live preview. (The PC tab's “Flip camera” is a different thing — it mirrors the image.)")
+                Text("Flips the tracker handedness if your avatar appears left-right reversed in VRChat. Affects only the OSC trackers, not the live preview. This is the SAME setting used by PC inference mode, so on-device and PC track identically.")
                     .foregroundStyle(Theme.textSecondary)
             }
 
@@ -250,6 +260,22 @@ struct OnDeviceSettings: View {
                        in: 1...10, step: 1)
             } footer: {
                 Text("Output OSC rate = this × the tracking FPS (capped 120 Hz). The upsampler forward-predicts each sub-frame, so a higher multiplier means a smoother AND lower-latency stream. 1× = raw inference rate; 7× is a good default. The live rate shows as OUT in the preview.")
+                    .foregroundStyle(Theme.textSecondary)
+            }
+
+            Section {
+                HStack {
+                    Text("Latency prediction (ms)")
+                    Spacer()
+                    Text("\(config.predictionLeadMs)")
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                Slider(value: Binding(get: { Double(config.predictionLeadMs) },
+                                      set: { config.predictionLeadMs = Int($0.rounded()) }),
+                       in: 0...150, step: 5)
+            } footer: {
+                Text("Forward-predicts your motion to cancel pipeline latency — higher feels lower-latency but overshoots more on fast direction changes. Applies to both On Device and PC modes. ~50ms is a safe start; push higher to chase minimum delay.")
                     .foregroundStyle(Theme.textSecondary)
             }
 
@@ -296,8 +322,63 @@ struct PCSettings: View {
                         .lineLimit(2)
                 }
             } footer: {
-                Text("The Mac becomes the camera + controller; the RTX PC runs the byte-exact PinoFBT model + IK and emits the VRChat OSC. Start/Stop is the main window's button.")
+                Text("The Mac becomes the camera + controller; the RTX PC runs the pose model + IK and emits the VRChat OSC. Start/Stop is the main window's button.")
                     .foregroundStyle(Theme.textSecondary)
+            }
+
+            // -- Model: which pose model the PC daemon runs --
+            Section("Model") {
+                Picker("Pose model", selection: $config.pcModel) {
+                    Text("NLF (byte-exact PinoFBT)").tag("nlf")
+                    Text("GVHMR (world-grounded)").tag("gvhmr")
+                }
+                .disabled(running)
+                Text("NLF is the byte-exact PinoFBT 2.0 model + IK (per-frame, camera-frame) — the default. GVHMR is world-grounded / gravity-aligned (steadier verticals + planted feet). Switching takes effect at the next Start; the OSC route + target are shared by both.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+
+                // GVHMR-only controls (hidden for NLF). Camera mode, readout lookahead,
+                // and the facing tune — all need live VRChat tuning by the user.
+                if config.pcModel == "gvhmr" {
+                    Picker("Camera", selection: $config.gvhmrMoving) {
+                        Text("Static (default)").tag(false)
+                        Text("Moving").tag(true)
+                    }
+                    .disabled(running)
+                    Text("Static is the fast real-time path (fixed camera) — leave it here. Moving runs GVHMR world-grounded with camera motion, the way it was meant originally — heavier and experimental.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+
+                    HStack {
+                        Text("Lookahead (k)")
+                        Spacer()
+                        Text("\(config.gvhmrK)")
+                            .monospacedDigit()
+                            .foregroundStyle(Theme.textSecondary)
+                    }
+                    Slider(value: Binding(get: { Double(config.gvhmrK) },
+                                          set: { config.gvhmrK = Int($0.rounded()) }),
+                           in: 0...15, step: 1)
+                    Text("Readout lookahead, in frames. Higher reads further ahead (smoother, more latency); lower is snappier. Default 5 — tune live against VRChat.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+
+                    Toggle("Mirror (facing)", isOn: $config.gvhmrMirror)
+                    Toggle("Flip X (facing)", isOn: $config.gvhmrFlipX)
+                    Text("Facing tune: if your avatar faces the wrong way or its handedness looks reversed in VRChat, toggle these (one or both) until it's correct. They only affect GVHMR.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+
+                    Toggle("Foot contact (planted feet)", isOn: $config.gvhmrFootContact)
+                    Text("Uses GVHMR's foot-contact prediction to damp planted feet (less foot-slide). Tune live against VRChat.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+
+                    Toggle("Native rotations (experimental)", isOn: $config.gvhmrNativeRot)
+                    Text("Uses GVHMR's own joint rotations instead of re-deriving them from positions (richer twist/roll). Experimental — needs live facing/convention tuning in VRChat; expect to combine with the Mirror/Flip-X toggles.")
+                        .font(.caption)
+                        .foregroundStyle(Theme.textSecondary)
+                }
             }
 
             // -- Connection --
@@ -324,7 +405,14 @@ struct PCSettings: View {
                 TextField("OSC port", text: Binding(
                     get: { String(config.pcOscPort) },
                     set: { if let p = Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) { config.pcOscPort = p } }))
+                Picker("OSC route", selection: $config.pcOscRelayViaMac) {
+                    Text("Direct (PC → Quest)").tag(false)
+                    Text("Relay via Mac (PC → Mac → Quest)").tag(true)
+                }
                 Text("Where the PC sends the trackers. For standalone Quest, enter the headset's Wi-Fi IP (Quest ▸ Settings ▸ Wi-Fi ▸ your network ▸ Advanced — reserve it in your router so it doesn't change). 127.0.0.1 only if VRChat runs on the PC via Quest Link.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+                Text("Route: Direct sends OSC straight from the PC to the Quest. Relay via Mac sends it to this Mac first, which forwards it to the Quest — use this when the PC is on wired ethernet and can't reach the Quest's Wi-Fi network but the Mac can.")
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
                 if oscTargetsLoopback {
@@ -345,7 +433,13 @@ struct PCSettings: View {
                         Text(cam.localizedName).tag(cam.uniqueID)
                     }
                 }
-                Toggle("Flip camera horizontally", isOn: $config.pcFlipCamera)
+                // NLF uses the SAME handedness setting as on-device (mirrorTracking) so PC
+                // and on-device track 1:1 — this is the same control as the General tab's
+                // "Swap tracker handedness", surfaced here for convenience. GVHMR has its OWN
+                // facing controls in the Model section, so hide this one for GVHMR.
+                if config.pcModel == "nlf" {
+                    Toggle("Swap tracker handedness (L/R)", isOn: $config.mirrorTracking)
+                }
                 Picker("Resolution", selection: Binding(
                     get: { "\(config.pcStreamWidth)x\(config.pcStreamHeight)" },
                     set: { sel in
@@ -372,7 +466,7 @@ struct PCSettings: View {
                 Slider(value: Binding(get: { Double(config.pcBitrateMbps) },
                                       set: { config.pcBitrateMbps = Int($0.rounded()) }),
                        in: 2...25, step: 1)
-                Text("Hardware H.264 (VideoToolbox) low-delay over Wi-Fi. Higher resolution/bitrate is sharper but adds a little latency. Flip matches PinoFBT's internal mirror.")
+                Text("Hardware H.264 (VideoToolbox) low-delay over Wi-Fi. Higher resolution/bitrate is sharper but adds a little latency. Mirror reflects the skeleton on the PC (selfie handedness) — the same proper L/R mirror as On Device, not an image flip.")
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
                 if running {
@@ -403,6 +497,23 @@ struct PCSettings: View {
                 }
                 Text("The GPU runs the real fast_kinematics solver, so the arms are byte-exact here — 8-point is the PinoFBT desktop default. OneEuro smoothing + IK are fixed to the original; height scales as cm/175 (shared with the On Device tab).")
                     .font(.caption)
+                    .foregroundStyle(Theme.textSecondary)
+            }
+
+            // -- Latency prediction (shared with the On Device tab) --
+            Section {
+                HStack {
+                    Text("Latency prediction (ms)")
+                    Spacer()
+                    Text("\(config.predictionLeadMs)")
+                        .monospacedDigit()
+                        .foregroundStyle(Theme.textSecondary)
+                }
+                Slider(value: Binding(get: { Double(config.predictionLeadMs) },
+                                      set: { config.predictionLeadMs = Int($0.rounded()) }),
+                       in: 0...150, step: 5)
+            } footer: {
+                Text("Forward-predicts your motion to cancel pipeline latency — higher feels lower-latency but overshoots more on fast direction changes. Applies to both On Device and PC modes. ~50ms is a safe start; push higher to chase minimum delay.")
                     .foregroundStyle(Theme.textSecondary)
             }
 

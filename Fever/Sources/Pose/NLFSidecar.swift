@@ -9,8 +9,9 @@ public protocol NLFInferenceService: AnyObject, Sendable {
 }
 
 /// Resolves the external NLF runtime: a venv python, the onnxruntime sidecar
-/// script, and the model. ALL stay outside the repo (the model is non-distributable
-/// study material). Base dir = env `FEVER_NLF_ROOT`, else the default dev tree.
+/// script, and the model. The runtime is gitignored (the model is non-distributable
+/// study material) but lives WITH the project at `Fever/nlf-runtime/`. Base dir = env
+/// `FEVER_NLF_ROOT`, else that bundled-alongside default.
 public struct NLFPaths: Sendable {
     public let python: String
     public let script: String
@@ -18,7 +19,7 @@ public struct NLFPaths: Sendable {
 
     public static func resolve(env: [String: String] = ProcessInfo.processInfo.environment) -> NLFPaths? {
         let base = (env["FEVER_NLF_ROOT"].map { ($0 as NSString).expandingTildeInPath })
-            ?? (("~/Dev/BodyPose3DDemo" as NSString).expandingTildeInPath)
+            ?? (("~/Documents/Projects/Fever/nlf-runtime" as NSString).expandingTildeInPath)
         let py = base + "/sidecar/.venv/bin/python3"
         let sc = base + "/sidecar/pinofbt_sidecar.py"
         let md = base + "/models/pino_pose_v4.onnx"

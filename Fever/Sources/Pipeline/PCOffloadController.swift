@@ -36,6 +36,7 @@ public final class PCOffloadController {
     private var worker: Task<Void, Never>?
     private var current: PCOffloadConfig?
     private var skelReceiver: PCSkeletonReceiver?
+    private var oscRelay: PCOscRelay?                 // Mac-side OSC bounce (relay route only)
     private var watchdog: Task<Void, Never>?
 
     /// Skeleton points (the PC's solved joints2D, normalized) sent back for the live
@@ -93,6 +94,7 @@ public final class PCOffloadController {
         streamer?.stop(); streamer = nil
         camera?.stop(); camera = nil
         skelReceiver?.stop(); skelReceiver = nil
+        oscRelay?.stop(); oscRelay = nil
         previewPoints = []
     }
 
@@ -147,12 +149,36 @@ public final class PCOffloadController {
             phase = .starting
             status = "Starting inference on \(cfg.host)…"
             // Skeleton return channel: receive the PC's joints2D for the live overlay.
-            // The hflip on the outgoing stream means the returned points are already
-            // mirror-aligned to the mirrored preview when flip is on; flip x otherwise.
+            // The camera image is streamed RAW (no hflip) and the skeleton is mirrored on
+            // the PC, so the returned joints2D are in raw-frame space; x-flip them to align
+            // with the ALWAYS-mirrored preview layer (matches the on-device overlay flip).
             let skelPort: UInt16 = 5001
-            startSkeletonReceiver(port: skelPort, flipX: !cfg.flip)
+            startSkeletonReceiver(port: skelPort, flipX: true)
             let skelBack = PCOrchestrator.localIP(reaching: cfg.host).map { "\($0):\(skelPort)" }
-            try await PCOffloadController.bg { try PCOrchestrator.startDaemon(cfg, skeletonBack: skelBack) }
+
+            // OSC route: Direct → the daemon sends straight to the Quest (cfg.oscIP:Port);
+            // Relay via Mac → the daemon sends to THIS Mac's LAN IP on relayPort and a
+            // PCOscRelay forwards each datagram on to the Quest (for when the wired PC
+            // can't reach the Quest's Wi-Fi subnet but the Mac can). The daemon's immediate
+            // target is computed here as immutable `let`s so the detached launch can capture
+            // them safely.
+            let daemonOsc: (ip: String, port: Int)
+            if cfg.relayViaMac {
+                guard let macIP = PCOrchestrator.localIP(reaching: cfg.host) else {
+                    throw PCOffloadError.stream("couldn't determine this Mac's LAN IP for the OSC relay")
+                }
+                guard let relay = PCOscRelay(port: UInt16(cfg.relayPort),
+                                             forwardHost: cfg.oscIP, forwardPort: UInt16(cfg.oscPort)) else {
+                    throw PCOffloadError.stream("couldn't open the OSC relay on port \(cfg.relayPort)")
+                }
+                oscRelay = relay
+                daemonOsc = (macIP, cfg.relayPort)
+            } else {
+                daemonOsc = (cfg.oscIP, cfg.oscPort)
+            }
+            try await PCOffloadController.bg {
+                try PCOrchestrator.startDaemon(cfg, oscIP: daemonOsc.ip, oscPort: daemonOsc.port, skeletonBack: skelBack)
+            }
             if Task.isCancelled { return }
 
             // Fever owns the camera (so the live preview works); ffmpeg can't open it
@@ -175,7 +201,7 @@ public final class PCOffloadController {
             let s = PCCameraStreamer(
                 ffmpegPath: ffmpeg, host: cfg.host, port: cfg.streamPort,
                 outW: cfg.streamW, outH: cfg.streamH,
-                fps: cfg.streamFPS, bitrateMbps: cfg.bitrateMbps, flip: cfg.flip,
+                fps: cfg.streamFPS, bitrateMbps: cfg.bitrateMbps,
                 onExit: { [weak self] code in
                     // ffmpeg early-exit (encoder/UDP failure, spawn failure=-1) → surface it
                     // and tear down (release the camera, kill the remote daemon) instead of
@@ -185,7 +211,9 @@ public final class PCOffloadController {
             streamer = s
             cam.onFrame = { [weak s] pb, _ in s?.feed(pb) }   // siphon frames to the encoder
             phase = .streaming
-            status = "Streaming → \(cfg.host)   ·   OSC → \(cfg.oscIP):\(cfg.oscPort)"
+            let route = cfg.relayViaMac ? "   ·   OSC → \(cfg.oscIP):\(cfg.oscPort) (via Mac)"
+                                        : "   ·   OSC → \(cfg.oscIP):\(cfg.oscPort)"
+            status = "Streaming \(cfg.model == .gvhmr ? "GVHMR" : "NLF") → \(cfg.host)\(route)"
             // First-frame watchdog: a camera can be authorized yet deliver nothing
             // (held by another app, asleep Continuity cam). If no frame has launched
             // ffmpeg within a few seconds, flip to .error instead of showing a green
@@ -247,17 +275,40 @@ public final class PCOffloadController {
 
 // MARK: - Immutable config snapshot
 
+/// Which pose model the PC daemon runs in PC mode. `.nlf` (default) launches the
+/// byte-exact PinoFBT 2.0 NLF daemon (`fbt_daemon.py`, trtlib py311 env); `.gvhmr`
+/// launches the world-grounded GVHMR daemon (`gvhmr_daemon.py`, its own `.venv`).
+public enum PCModel: String, Sendable, Equatable {
+    case nlf
+    case gvhmr
+}
+
 /// Everything the orchestration needs, captured once at start (Sendable so it can
 /// cross into the detached worker). Paths target the deep hidden PC bridge.
 public struct PCOffloadConfig: Sendable, Equatable {
     public var host: String          // PC IP for SSH + the UDP video target
     public var user: String          // SSH user
     public var mac: String           // PC NIC MAC for Wake-on-LAN
-    public var oscIP: String         // where the PC sends VRChat OSC (127.0.0.1 = PCVR, else Quest IP)
+    public var model: PCModel        // which pose model the daemon runs (NLF default, or GVHMR)
+    public var oscIP: String         // the FINAL VRChat OSC target (127.0.0.1 = PCVR, else Quest IP)
     public var oscPort: Int
+    /// OSC route. false = Direct: the daemon sends straight to `oscIP:oscPort`. true =
+    /// Relay via Mac: the daemon sends to this Mac's LAN IP on `relayPort`, and a Mac-side
+    /// `PCOscRelay` forwards every datagram on to `oscIP:oscPort` (the Quest). Use relay
+    /// when the wired PC can't reach the Quest's Wi-Fi subnet but the Mac can.
+    public var relayViaMac: Bool
+    public var relayPort: Int         // local UDP port the Mac relay listens on (relay route)
     public var heightCm: Int
     public var sendElbows: Bool      // 8-point (PinoFBT desktop default)
-    public var flip: Bool            // mirror the camera before streaming (PinoFBT cv2.flip parity)
+    public var mirror: Bool          // proper L/R skeleton mirror on the PC (on-device mirrorTracking; NLF)
+    public var predictionLeadMs: Int // forward-lead horizon (ms) → --lead-ms; cancels pipeline latency (both models)
+    // -- GVHMR-only knobs (ignored for NLF) --
+    public var gvhmrK: Int           // GVHMR readout lookahead (frames); latency↔smoothness, default 5
+    public var gvhmrMirror: Bool     // GVHMR facing tune → --mirror
+    public var gvhmrFlipX: Bool      // GVHMR facing tune → --flip-x
+    public var gvhmrMoving: Bool     // GVHMR camera mode: false = Static (fast), true = Moving → --moving
+    public var gvhmrFootContact: Bool // GVHMR foot-contact damping (less foot-slide) → --foot-contact
+    public var gvhmrNativeRot: Bool  // GVHMR native joint rotations (richer twist/roll) → --native-rot
     public var streamW: Int          // H.264 stream width
     public var streamH: Int          // H.264 stream height
     public var streamFPS: Int        // capture/encode fps
@@ -266,41 +317,130 @@ public struct PCOffloadConfig: Sendable, Equatable {
     public var fpsCap: Int           // PC-side processing cap (0 = unlimited)
     public var cameraName: String?   // avfoundation device name for ffmpeg (nil → "0" = default cam)
     public var streamPort: Int       // UDP port the PC daemon listens on (daemon default = 5000)
-    public var pythonw: String       // PC pythonw.exe (no console)
-    public var daemon: String        // PC fbt_daemon.py
+    public var interpreter: String   // PC python interpreter: NLF = pythonw.exe (no console); GVHMR = its .venv python.exe
+    public var daemon: String        // PC daemon script (fbt_daemon.py or gvhmr_daemon.py)
+    public var daemonMatch: String   // command-line substring to find this daemon for alive/stop (must NOT match the other model)
     public var ffmpeg: String        // local ffmpeg
 
-    public init(host: String, user: String, mac: String, oscIP: String, oscPort: Int,
-                heightCm: Int, sendElbows: Bool, flip: Bool, streamW: Int, streamH: Int,
+    public init(host: String, user: String, mac: String, model: PCModel = .nlf,
+                oscIP: String, oscPort: Int,
+                relayViaMac: Bool, relayPort: Int,
+                heightCm: Int, sendElbows: Bool, mirror: Bool, predictionLeadMs: Int = 50,
+                gvhmrK: Int = 5, gvhmrMirror: Bool = false, gvhmrFlipX: Bool = false, gvhmrMoving: Bool = false,
+                gvhmrFootContact: Bool = false, gvhmrNativeRot: Bool = false,
+                streamW: Int, streamH: Int,
                 streamFPS: Int, bitrateMbps: Int, politeMode: Bool, fpsCap: Int,
                 cameraName: String?, streamPort: Int = 5000,
-                pythonw: String, daemon: String, ffmpeg: String) {
-        self.host = host; self.user = user; self.mac = mac
+                interpreter: String, daemon: String, daemonMatch: String, ffmpeg: String) {
+        self.host = host; self.user = user; self.mac = mac; self.model = model
         self.oscIP = oscIP; self.oscPort = oscPort
-        self.heightCm = heightCm; self.sendElbows = sendElbows; self.flip = flip
+        self.relayViaMac = relayViaMac; self.relayPort = relayPort
+        self.heightCm = heightCm; self.sendElbows = sendElbows; self.mirror = mirror
+        self.predictionLeadMs = predictionLeadMs
+        self.gvhmrK = gvhmrK; self.gvhmrMirror = gvhmrMirror
+        self.gvhmrFlipX = gvhmrFlipX; self.gvhmrMoving = gvhmrMoving
+        self.gvhmrFootContact = gvhmrFootContact; self.gvhmrNativeRot = gvhmrNativeRot
         self.streamW = streamW; self.streamH = streamH; self.streamFPS = streamFPS
         self.bitrateMbps = bitrateMbps; self.politeMode = politeMode; self.fpsCap = fpsCap
         self.cameraName = cameraName; self.streamPort = streamPort
-        self.pythonw = pythonw; self.daemon = daemon; self.ffmpeg = ffmpeg
+        self.interpreter = interpreter; self.daemon = daemon; self.daemonMatch = daemonMatch
+        self.ffmpeg = ffmpeg
     }
 
     /// Default for the GPU PC (the deep hidden `\.rtcache\…\.bridge`). The Windows
     /// home username is taken from the SSH `user` the operator entered — NOT hardcoded
     /// (this is a public repo). Override the whole base path with `FEVER_PC_BRIDGE`.
-    public static func make(host: String, user: String, mac: String, oscIP: String, oscPort: Int,
-                            heightCm: Int, sendElbows: Bool, flip: Bool, streamW: Int, streamH: Int,
+    ///
+    /// `model` selects which daemon to launch under the SAME `.bridge` base:
+    ///   • `.nlf`   → trtlib `\py311\pythonw.exe` running `\work\fbt_daemon.py`.
+    ///   • `.gvhmr` → the GVHMR `\gvhmr\.venv\Scripts\python.exe` running `\gvhmr\gvhmr_daemon.py`.
+    /// `daemonMatch` is the per-model command-line token used to find/stop ONLY that
+    /// daemon (so GVHMR's stop never kills NLF's, and vice-versa).
+    public static func make(host: String, user: String, mac: String, model: PCModel = .nlf,
+                            oscIP: String, oscPort: Int,
+                            relayViaMac: Bool, relayPort: Int,
+                            heightCm: Int, sendElbows: Bool, mirror: Bool, predictionLeadMs: Int = 50,
+                            gvhmrK: Int = 5, gvhmrMirror: Bool = false, gvhmrFlipX: Bool = false,
+                            gvhmrMoving: Bool = false,
+                            gvhmrFootContact: Bool = false, gvhmrNativeRot: Bool = false,
+                            streamW: Int, streamH: Int,
                             streamFPS: Int, bitrateMbps: Int, politeMode: Bool, fpsCap: Int,
                             streamPort: Int, cameraName: String?) -> PCOffloadConfig {
         let base = ProcessInfo.processInfo.environment["FEVER_PC_BRIDGE"]
             ?? #"C:\Users\\#(user)\AppData\Local\.rtcache\runtime\v8\store\.bridge"#
+        let interpreter: String, daemon: String, daemonMatch: String
+        switch model {
+        case .nlf:
+            interpreter = base + #"\py311\pythonw.exe"#
+            daemon = base + #"\work\fbt_daemon.py"#
+            daemonMatch = "fbt_daemon"
+        case .gvhmr:
+            interpreter = base + #"\gvhmr\.venv\Scripts\python.exe"#
+            daemon = base + #"\gvhmr\gvhmr_daemon.py"#
+            daemonMatch = "gvhmr_daemon"
+        }
         return PCOffloadConfig(
-            host: host, user: user, mac: mac, oscIP: oscIP, oscPort: oscPort,
-            heightCm: heightCm, sendElbows: sendElbows, flip: flip,
+            host: host, user: user, mac: mac, model: model, oscIP: oscIP, oscPort: oscPort,
+            relayViaMac: relayViaMac, relayPort: relayPort,
+            heightCm: heightCm, sendElbows: sendElbows, mirror: mirror, predictionLeadMs: predictionLeadMs,
+            gvhmrK: gvhmrK, gvhmrMirror: gvhmrMirror, gvhmrFlipX: gvhmrFlipX, gvhmrMoving: gvhmrMoving,
+            gvhmrFootContact: gvhmrFootContact, gvhmrNativeRot: gvhmrNativeRot,
             streamW: streamW, streamH: streamH, streamFPS: streamFPS, bitrateMbps: bitrateMbps,
             politeMode: politeMode, fpsCap: fpsCap, cameraName: cameraName, streamPort: streamPort,
-            pythonw: base + #"\py311\pythonw.exe"#,
-            daemon: base + #"\work\fbt_daemon.py"#,
+            interpreter: interpreter, daemon: daemon, daemonMatch: daemonMatch,
             ffmpeg: "/opt/homebrew/bin/ffmpeg")
+    }
+
+    /// The WMI `Win32_Process.Create` CommandLine that launches this config's daemon.
+    /// Pure / string-only (no SSH, no side effects) so the exact launch arguments are
+    /// unit-testable. `oscIP`/`oscPort` are the daemon's IMMEDIATE OSC target (the Quest
+    /// for Direct, this Mac for Relay — resolved by the controller); `skeletonBack` is the
+    /// optional `host:port` return channel (NLF only — GVHMR's contract has no such flag).
+    ///
+    /// • NLF   → `--osc-ip --osc-port --height [--six-point] [--no-mirror] [--polite]
+    ///   [--fps-cap N] [--skeleton-back sb] --lead-ms <predictionLeadMs>`.
+    /// • GVHMR → `--listen udp://0.0.0.0:<streamPort>?overrun_nonfatal=1&fifo_size=5000000
+    ///   --osc-ip --osc-port --height --k [--six-point] [--mirror] [--flip-x] [--moving]
+    ///   [--foot-contact] [--native-rot] --out-hz 120 --lead-ms <predictionLeadMs>`. The `&`
+    ///   is literal here (this string is passed to `Win32_Process.Create` verbatim, never
+    ///   through cmd.exe) and the URL has no spaces, so it stays a single argv token.
+    ///
+    /// `--lead-ms` is the user-tunable forward-lead in MILLISECONDS (the daemon divides by
+    /// 1000 for its lead horizon), applied to BOTH models to cancel pipeline latency.
+    public func daemonCommandLine(oscIP: String, oscPort: Int, skeletonBack: String?) -> String {
+        // Double-quote the (space-capable) program + script paths; flags/values are simple
+        // tokens. Strip any embedded double-quote so the quoting can't be broken out of.
+        func dq(_ s: String) -> String { "\"" + s.replacingOccurrences(of: "\"", with: "") + "\"" }
+        var cmd = "\(dq(interpreter)) \(dq(daemon))"
+        switch model {
+        case .nlf:
+            cmd += " --osc-ip \(oscIP) --osc-port \(oscPort) --height \(heightCm)"
+            if !sendElbows { cmd += " --six-point" }
+            // Proper L/R skeleton mirror on the PC (NOT an image flip), matching on-device
+            // mirrorTracking. The daemon defaults to mirror-on, so only pass --no-mirror.
+            if !mirror { cmd += " --no-mirror" }
+            if politeMode { cmd += " --polite" }
+            if fpsCap > 0 { cmd += " --fps-cap \(fpsCap)" }
+            if let sb = skeletonBack { cmd += " --skeleton-back \(sb)" }
+            // User-tunable forward-lead (ms) to cancel pipeline latency (shared with on-device).
+            cmd += " --lead-ms \(predictionLeadMs)"
+        case .gvhmr:
+            cmd += " --listen udp://0.0.0.0:\(streamPort)?overrun_nonfatal=1&fifo_size=16384"
+            cmd += " --osc-ip \(oscIP) --osc-port \(oscPort) --height \(heightCm) --k \(gvhmrK)"
+            if !sendElbows { cmd += " --six-point" }
+            if gvhmrMirror { cmd += " --mirror" }
+            if gvhmrFlipX { cmd += " --flip-x" }
+            if gvhmrMoving { cmd += " --moving" }
+            // Experimental tunes: foot-contact damping (less foot-slide) and GVHMR's own
+            // joint rotations (richer twist/roll, in place of position-derived rotations).
+            if gvhmrFootContact { cmd += " --foot-contact" }
+            if gvhmrNativeRot { cmd += " --native-rot" }
+            // Skeleton return channel: the daemon projects the in-camera joints to 2D and
+            // sends them back for the live preview overlay (same 24x2 f32 contract as NLF).
+            if let sb = skeletonBack { cmd += " --skeleton-back \(sb)" }
+            cmd += " --out-hz 120 --lead-ms \(predictionLeadMs)"
+        }
+        return cmd
     }
 }
 
@@ -474,23 +614,42 @@ enum PCOrchestrator {
         throw PCOffloadError.unreachable
     }
 
-    static func startDaemon(_ c: PCOffloadConfig, skeletonBack: String? = nil) throws {
-        // pythonw.exe = no console; Start-Process -WindowStyle Hidden = nothing on screen.
-        // streamPort is the daemon default (5000) so we needn't pass --listen (avoids
-        // quoting the '&' in the udp URL through cmd→powershell).
+    static func startDaemon(_ c: PCOffloadConfig, oscIP: String? = nil, oscPort: Int? = nil,
+                            skeletonBack: String? = nil) throws {
+        // Launch the daemon DETACHED from the SSH session, via WMI Win32_Process.Create.
         //
-        // The remote command string is PARSED by PowerShell, so single-quote every
-        // interpolated value and escape an embedded quote by doubling it — otherwise a
-        // value containing "'" (e.g. a hand-typed OSC host) could break the quoting or
-        // inject a command. Numeric fields (Int) can't contain quotes, so they stay bare.
-        func q(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "''") + "'" }
-        var argList = "\(q(c.daemon)),'--osc-ip',\(q(c.oscIP)),'--osc-port','\(c.oscPort)','--height','\(c.heightCm)'"
-        if !c.sendElbows { argList += ",'--six-point'" }
-        if c.politeMode  { argList += ",'--polite'" }
-        if c.fpsCap > 0  { argList += ",'--fps-cap','\(c.fpsCap)'" }
-        if let sb = skeletonBack { argList += ",'--skeleton-back',\(q(sb))" }
-        let psCmd = "Start-Process -FilePath \(q(c.pythonw)) -ArgumentList \(argList) -WindowStyle Hidden"
-        let (st, out) = try ssh(c, "powershell -NoProfile -Command \"\(psCmd)\"")
+        // CRITICAL: a plain `Start-Process` child is part of the SSH session's process
+        // tree, and Windows OpenSSH KILLS that tree the moment the (one-shot) SSH session
+        // closes — which is immediately after this returns. That silently killed the
+        // daemon mid-startup (it printed its boot banner, then died during model load),
+        // so PC inference never actually ran: no tracking, no skeleton, no OSC, while the
+        // Mac still showed its local camera preview and a green "Streaming". WMI spawns
+        // the process under WmiPrvSE, OUTSIDE the SSH session, so it survives the close.
+        // NLF uses pythonw.exe (GUI-subsystem, no window); GVHMR uses its .venv python.exe,
+        // which under the non-interactive WMI host raises no window on the user's desktop
+        // either — so nothing appears on the PC for either model.
+        //
+        // The exact argv is built by the model-aware `daemonCommandLine` (NLF = the
+        // original launch unchanged; GVHMR = its own --listen/--k/--moving contract).
+        // The daemon's IMMEDIATE OSC target: the Quest directly (Direct route) or this
+        // Mac's relay (Relay route). Defaults to the config's final target for Direct.
+        let dOscIP = oscIP ?? c.oscIP
+        let dOscPort = oscPort ?? c.oscPort
+        let cmd = c.daemonCommandLine(oscIP: dOscIP, oscPort: dOscPort, skeletonBack: skeletonBack)
+        // CommandLine is single-quoted for PowerShell (double any embedded single quote).
+        let cmdLit = cmd.replacingOccurrences(of: "'", with: "''")
+        // Defensive: reap any stale Fever daemon (either model) BEFORE launching, so an
+        // earlier session that didn't clean up (app crash / lost SSH) can't leave an orphan
+        // pinning the GPU alongside the new one. Then WMI-Create the new daemon.
+        let ps = "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'gvhmr_daemon|fbt_daemon' } "
+            + "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; "
+            + "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create "
+            + "-Arguments @{CommandLine='\(cmdLit)'}; "
+            + "if ($r.ReturnValue -ne 0) { Write-Error \"WMI Create rc=$($r.ReturnValue)\"; exit 1 }"
+        // Pass the script as base64 UTF-16LE via -EncodedCommand so NO quoting has to
+        // survive the SSH→PowerShell hop (the old nested-quote form was brittle).
+        let enc = Data(ps.utf16.flatMap { [UInt8($0 & 0xff), UInt8($0 >> 8)] }).base64EncodedString()
+        let (st, out) = try ssh(c, "powershell -NoProfile -EncodedCommand \(enc)")
         if st != 0 { throw PCOffloadError.daemonLaunch(out.trimmingCharacters(in: .whitespacesAndNewlines)) }
     }
 
@@ -498,8 +657,14 @@ enum PCOrchestrator {
     /// probe itself succeeded AND found zero matching processes — a transient SSH
     /// failure returns true so a network hiccup can't kill a working session.
     static func daemonAlive(_ c: PCOffloadConfig) -> Bool {
-        let cmd = "(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'fbt_daemon' } | Measure-Object).Count"
-        guard let (st, out) = try? ssh(c, "powershell -NoProfile -Command \"\(cmd)\"", timeout: 12), st == 0 else {
+        // Match ONLY this model's daemon (fbt_daemon vs gvhmr_daemon) so an NLF probe
+        // never reads a stray GVHMR daemon as alive, and vice-versa.
+        // Sent via -EncodedCommand: the PC's default SSH shell is PowerShell, which would
+        // otherwise consume the pipeline `$_` in a raw -Command string (turning the filter
+        // into a `.CommandLine` error that matches nothing).
+        let script = "$ProgressPreference='SilentlyContinue'; (Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match '\(c.daemonMatch)' } | Measure-Object).Count"
+        let enc = Data(script.utf16.flatMap { [UInt8($0 & 0xff), UInt8($0 >> 8)] }).base64EncodedString()
+        guard let (st, out) = try? ssh(c, "powershell -NoProfile -EncodedCommand \(enc)", timeout: 12), st == 0 else {
             return true
         }
         return (Int(out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 1) > 0
@@ -510,9 +675,16 @@ enum PCOrchestrator {
     /// instead of falsely reporting a clean stop while the daemon keeps running.
     @discardableResult
     static func stopDaemon(_ c: PCOffloadConfig) -> Bool {
-        let psCmd = "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'fbt_daemon' } "
+        // Kill EITHER Fever daemon (gvhmr_daemon OR fbt_daemon). There is only ever one
+        // session, so a Stop should FULLY clean up the PC — including the other model's
+        // daemon left over from a mid-session model switch (which the old per-model match
+        // would orphan). Sent via -EncodedCommand because the PC's default SSH shell is
+        // PowerShell and would otherwise expand the pipeline `$_` itself, breaking the
+        // Where-Object filter so nothing got killed (the "Stop didn't stop it" bug).
+        let script = "$ProgressPreference='SilentlyContinue'; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'gvhmr_daemon|fbt_daemon' } "
             + "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
-        guard let (st, _) = try? ssh(c, "powershell -NoProfile -Command \"\(psCmd)\"", timeout: 15) else { return false }
+        let enc = Data(script.utf16.flatMap { [UInt8($0 & 0xff), UInt8($0 >> 8)] }).base64EncodedString()
+        guard let (st, _) = try? ssh(c, "powershell -NoProfile -EncodedCommand \(enc)", timeout: 15) else { return false }
         return st == 0
     }
 

@@ -24,9 +24,12 @@ unlocked, and tracking that stays still when you do.
 - The full eight-tracker VRChat set — hip, chest, both feet, both knees, both
   elbows — plus a head reference point that keeps the play space aligned.
 - Runs live off the built-in camera or any USB webcam.
-- One-button recenter: stand in a T-pose, click, you're set.
-- Smoothed where it counts. A One-Euro filter on the tracker output kills jitter;
-  the on-screen skeleton draws raw landmarks so the preview stays glued to you.
+- Calibrate in VRChat: stand in a T-pose and run the headset's tracker
+  calibration. Fever streams absolute poses, so VRChat owns the alignment.
+- Smoothed where it counts. A One-Euro filter feeds a forward-predicting
+  upsampler that fills the gap between inferences, so the stream is both smooth
+  and low-latency; the on-screen skeleton draws raw landmarks so the preview
+  stays glued to you.
 - Talks to VRChat over OSC/UDP. A standalone Quest works over Wi-Fi with no PC and
   no driver.
 
@@ -62,8 +65,8 @@ and exits non-zero on failure.)
 2. In Settings, point the OSC host at the device running VRChat (your headset or
    PC) and leave the port at `9000`.
 3. In VRChat, set your **real height** under Tracking & IK and make sure OSC is on.
-4. Step back until your whole body is in frame, get into a T-pose, hit Recenter.
-5. Run VRChat's calibration — arms out, feet on the floor.
+4. Step back until your whole body is in frame.
+5. Run VRChat's calibration — T-pose, arms out, feet on the floor.
 
 Two things matter more than they should: your VRChat height has to match your
 actual height or your feet sink through the floor, and you want an even, well-lit
@@ -94,7 +97,7 @@ and the commits.
 The code is three SwiftPM targets:
 
 ```
-FeverCore    pure logic: pose solve, One-Euro, coordinate mapping, OSC encoding
+FeverCore    pure logic: PinoFBT IK solve, One-Euro, fps-mux upsampling, OSC encoding
 Fever        the @main app: SwiftUI window, camera preview, skeleton overlay, CLI
 FeverCheck   headless assertion runner (swift run FeverCheck)
 ```
