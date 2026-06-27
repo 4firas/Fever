@@ -641,8 +641,11 @@ enum PCOrchestrator {
         // Defensive: reap any stale Fever daemon (either model) BEFORE launching, so an
         // earlier session that didn't clean up (app crash / lost SSH) can't leave an orphan
         // pinning the GPU alongside the new one. Then WMI-Create the new daemon.
-        let ps = "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'gvhmr_daemon|fbt_daemon|frame_source' } "
-            + "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; "
+        // Reap with VERIFY: re-check and re-kill until zero matches remain (bounded ~3s), so
+        // a daemon that's slow to die mid-model-load can't briefly coexist with the new one
+        // (the rapid-toggle pileup). Only THEN WMI-Create the new daemon.
+        let ps = "$ProgressPreference='SilentlyContinue'; $pat='gvhmr_daemon|fbt_daemon|frame_source'; "
+            + "for($i=0;$i -lt 15;$i++){ $p=@(Get-CimInstance Win32_Process|Where-Object{$_.CommandLine -match $pat}); if($p.Count -eq 0){break}; $p|ForEach-Object{Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue}; Start-Sleep -Milliseconds 200 } "
             + "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create "
             + "-Arguments @{CommandLine='\(cmdLit)'}; "
             + "if ($r.ReturnValue -ne 0) { Write-Error \"WMI Create rc=$($r.ReturnValue)\"; exit 1 }"
@@ -684,8 +687,11 @@ enum PCOrchestrator {
         // Also kill the decoder subprocess (frame_source --decode) the daemon spawns — on
         // Windows it isn't auto-killed with its parent. (It would self-exit within ~5s via
         // the stale-heartbeat guard, but killing it now frees UDP :5000 for an instant restart.)
-        let script = "$ProgressPreference='SilentlyContinue'; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'gvhmr_daemon|fbt_daemon|frame_source' } "
-            + "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+        // VERIFY-killed: re-check and re-kill until zero matches remain (bounded ~3s), so Stop
+        // doesn't report "Idle" until the daemon + decoder are actually gone — and a slow-dying
+        // daemon can't survive into the next Start.
+        let script = "$ProgressPreference='SilentlyContinue'; $pat='gvhmr_daemon|fbt_daemon|frame_source'; "
+            + "for($i=0;$i -lt 15;$i++){ $p=@(Get-CimInstance Win32_Process|Where-Object{$_.CommandLine -match $pat}); if($p.Count -eq 0){break}; $p|ForEach-Object{Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue}; Start-Sleep -Milliseconds 200 }"
         let enc = Data(script.utf16.flatMap { [UInt8($0 & 0xff), UInt8($0 >> 8)] }).base64EncodedString()
         guard let (st, _) = try? ssh(c, "powershell -NoProfile -EncodedCommand \(enc)", timeout: 15) else { return false }
         return st == 0
