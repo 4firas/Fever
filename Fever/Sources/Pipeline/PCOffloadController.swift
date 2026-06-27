@@ -494,7 +494,7 @@ enum PCOrchestrator {
         guard got == 0 else { return nil }
         var buf = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
         inet_ntop(AF_INET, &local.sin_addr, &buf, socklen_t(INET_ADDRSTRLEN))
-        return String(cString: buf)
+        return String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 
     // -- Wake-on-LAN: raw UDP broadcast of the magic packet (no external deps) --
