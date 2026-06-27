@@ -641,7 +641,7 @@ enum PCOrchestrator {
         // Defensive: reap any stale Fever daemon (either model) BEFORE launching, so an
         // earlier session that didn't clean up (app crash / lost SSH) can't leave an orphan
         // pinning the GPU alongside the new one. Then WMI-Create the new daemon.
-        let ps = "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'gvhmr_daemon|fbt_daemon' } "
+        let ps = "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'gvhmr_daemon|fbt_daemon|frame_source' } "
             + "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force }; "
             + "$r = Invoke-CimMethod -ClassName Win32_Process -MethodName Create "
             + "-Arguments @{CommandLine='\(cmdLit)'}; "
@@ -681,7 +681,10 @@ enum PCOrchestrator {
         // would orphan). Sent via -EncodedCommand because the PC's default SSH shell is
         // PowerShell and would otherwise expand the pipeline `$_` itself, breaking the
         // Where-Object filter so nothing got killed (the "Stop didn't stop it" bug).
-        let script = "$ProgressPreference='SilentlyContinue'; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'gvhmr_daemon|fbt_daemon' } "
+        // Also kill the decoder subprocess (frame_source --decode) the daemon spawns — on
+        // Windows it isn't auto-killed with its parent. (It would self-exit within ~5s via
+        // the stale-heartbeat guard, but killing it now frees UDP :5000 for an instant restart.)
+        let script = "$ProgressPreference='SilentlyContinue'; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'gvhmr_daemon|fbt_daemon|frame_source' } "
             + "| ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
         let enc = Data(script.utf16.flatMap { [UInt8($0 & 0xff), UInt8($0 >> 8)] }).base64EncodedString()
         guard let (st, _) = try? ssh(c, "powershell -NoProfile -EncodedCommand \(enc)", timeout: 15) else { return false }
