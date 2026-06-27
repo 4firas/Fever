@@ -297,7 +297,7 @@ public final class CameraCapture: NSObject, FrameSource {
     public func detachPreview(_ layer: AVCaptureVideoPreviewLayer) {
         nonisolated(unsafe) let lyr = layer
         sessionQueue.async {
-            if lyr.session != nil { lyr.session = nil }
+            if lyr.session !== nil { lyr.session = nil }
         }
     }
 

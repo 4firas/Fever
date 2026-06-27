@@ -207,7 +207,7 @@ struct OnDeviceSettings: View {
                 Picker("Camera", selection: Binding(
                     get: { config.cameraDeviceID },
                     set: { config.cameraDeviceID = $0; camera.selectCamera($0.isEmpty ? nil : $0) })) {
-                    Text("Auto (prefer external)").tag("")
+                    Text("Auto (built-in)").tag("")
                     ForEach(CameraCapture.availableCameras(), id: \.uniqueID) { cam in
                         Text(cam.localizedName).tag(cam.uniqueID)
                     }
@@ -428,7 +428,7 @@ struct PCSettings: View {
                 Picker("Camera", selection: Binding(
                     get: { config.cameraDeviceID },
                     set: { config.cameraDeviceID = $0; camera.selectCamera($0.isEmpty ? nil : $0) })) {
-                    Text("Auto (prefer external)").tag("")
+                    Text("Auto (built-in)").tag("")
                     ForEach(CameraCapture.availableCameras(), id: \.uniqueID) { cam in
                         Text(cam.localizedName).tag(cam.uniqueID)
                     }

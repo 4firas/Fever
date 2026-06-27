@@ -240,6 +240,19 @@ public final class TrackingConfig {
 
     public init() {
         let d = UserDefaults.standard
+        // One-shot migration: move EXISTING installs off the old higher-latency defaults
+        // (gvhmrK 5 → 2; stream 1280×720 → 960×540) exactly once, then persist. Gated by a
+        // flag so a later DELIBERATE change to those values is respected (not re-overridden
+        // every launch). Fresh installs never had these keys, so they just take the new
+        // defaults below — this block is a no-op for them.
+        if !d.bool(forKey: Keys.didMigrateLatencyDefaults) {
+            if d.object(forKey: Keys.gvhmrK) as? Int == 5 { d.set(2, forKey: Keys.gvhmrK) }
+            if d.object(forKey: Keys.pcStreamWidth) as? Int == 1280,
+               d.object(forKey: Keys.pcStreamHeight) as? Int == 720 {
+                d.set(960, forKey: Keys.pcStreamWidth); d.set(540, forKey: Keys.pcStreamHeight)
+            }
+            d.set(true, forKey: Keys.didMigrateLatencyDefaults)
+        }
         oscHost = d.string(forKey: Keys.oscHost) ?? "127.0.0.1"
         oscPort = d.object(forKey: Keys.oscPort) as? Int ?? 9000
         cameraDeviceID = d.string(forKey: Keys.cameraDeviceID) ?? ""
@@ -265,12 +278,10 @@ public final class TrackingConfig {
         // supersampled for it, while 720p just spends more MJPEG encode + UDP packets
         // (reassembly jitter) + PC decode for pixels the model throws away. The Mac
         // preview is the LOCAL full-res camera, not this stream, so this is invisible
-        // on-screen and only cuts transport latency. Migrate installs still sitting on
-        // the old 1280×720 default down to 540p (a deliberate higher pick is preserved).
-        var sw = d.object(forKey: Keys.pcStreamWidth) as? Int ?? 960
-        var sh = d.object(forKey: Keys.pcStreamHeight) as? Int ?? 540
-        if sw == 1280 && sh == 720 { sw = 960; sh = 540 }
-        pcStreamWidth = sw; pcStreamHeight = sh
+        // on-screen and only cuts transport latency. (Existing 1280×720 installs are moved
+        // here by the one-shot migration above.)
+        pcStreamWidth = d.object(forKey: Keys.pcStreamWidth) as? Int ?? 960
+        pcStreamHeight = d.object(forKey: Keys.pcStreamHeight) as? Int ?? 540
         pcStreamFPS = d.object(forKey: Keys.pcStreamFPS) as? Int ?? 60
         pcBitrateMbps = d.object(forKey: Keys.pcBitrateMbps) as? Int ?? 10
         pcPoliteMode = d.object(forKey: Keys.pcPoliteMode) as? Bool ?? false
@@ -282,10 +293,8 @@ public final class TrackingConfig {
         // latency: ~k/fps seconds (k=5 @ 30fps ≈ 167ms, @ 25fps ≈ 200ms). The window's
         // 119 PAST frames already denoise the readout even at k=0, and output-side OneEuro
         // + the predictive upsampler absorb residual jitter — so a low k is a big latency
-        // win for marginal quality. Default 2; migrate installs off the old laggy k=5.
-        var gk = min(15, max(0, d.object(forKey: Keys.gvhmrK) as? Int ?? 2))
-        if d.object(forKey: Keys.gvhmrK) as? Int == 5 { gk = 2 }
-        gvhmrK = gk
+        // win for marginal quality. Default 2 (old k=5 installs moved by the migration above).
+        gvhmrK = min(15, max(0, d.object(forKey: Keys.gvhmrK) as? Int ?? 2))
         gvhmrMirror = d.object(forKey: Keys.gvhmrMirror) as? Bool ?? false
         gvhmrFlipX = d.object(forKey: Keys.gvhmrFlipX) as? Bool ?? false
         gvhmrMoving = d.object(forKey: Keys.gvhmrMoving) as? Bool ?? false
@@ -313,6 +322,7 @@ public final class TrackingConfig {
         static let pcOscPort = "pcOscPort"
         static let pcOscRelayViaMac = "pcOscRelayViaMac"
         static let pcSendElbows = "pcSendElbows"
+        static let didMigrateLatencyDefaults = "didMigrateLatencyDefaults"
         static let pcStreamWidth = "pcStreamWidth"
         static let pcStreamHeight = "pcStreamHeight"
         static let pcStreamFPS = "pcStreamFPS"
