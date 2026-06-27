@@ -207,7 +207,11 @@ final class PCCameraStreamer: @unchecked Sendable {
     }
 
     func stop() {
-        let proc: Process? = lock.withLock { running = false; latestPB = nil; return ffmpeg }
+        // Snapshot proc + handle UNDER the lock (the terminationHandler also nils these
+        // under the lock on an arbitrary thread, so reading them unsynchronized would race).
+        let (proc, fh): (Process?, FileHandle?) = lock.withLock {
+            running = false; latestPB = nil; return (ffmpeg, stdin)
+        }
         frameReady.signal()                               // wake an idle writer so it exits wait()
         // Terminate ffmpeg DIRECTLY (Process.terminate is thread-safe). This closes
         // ffmpeg's stdin read-end, so a writer wedged inside a blocking `write()` (a
@@ -215,9 +219,9 @@ final class PCCameraStreamer: @unchecked Sendable {
         // queued behind that same wedged write on the serial queue, could never run.
         if let proc, proc.isRunning { proc.terminate() }
         // Serialize the handle close on the writer queue so it can't race a mid-flight write.
-        writeQueue.async { [self] in
-            try? stdin?.close()
-            if let f = ffmpeg, f.isRunning { f.terminate() }
+        writeQueue.async {
+            try? fh?.close()
+            if let proc, proc.isRunning { proc.terminate() }
         }
     }
 
