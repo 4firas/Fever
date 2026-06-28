@@ -7,7 +7,7 @@ import simd
 /// expressed as Unity ZXY EULER ANGLES IN DEGREES.
 ///
 /// The coordinate/handedness/unit conversion has already happened upstream in
-/// `CoordinateMapper`; `OSCSender` only serializes and transmits.
+/// `PinoSolver`; `OSCSender` only serializes and transmits.
 public struct OSCTracker: Sendable {
     public let slot: String
     public let position: SIMD3<Float>
@@ -39,6 +39,7 @@ public actor OSCSender {
     public let port: Int
 
     private var connection: NWConnection?
+    private var stopped = false           // latched in stop(); blocks a late, out-of-order start()
     private let queue = DispatchQueue(label: "fever.osc", qos: .userInitiated)
 
     /// When false (default), trackers are sent POSITION-ONLY — no `/rotation`
@@ -47,6 +48,13 @@ public actor OSCSender {
     /// eases back to the wrong orientation. Position-only lets VRChat's IK solve
     /// limb rotation itself, which is the stable behavior for monocular tracking.
     private var rotationEnabled: Bool = false
+
+    /// ALL eight numbered body slots carry `/rotation` when enabled — slot 1=chest,
+    /// 2=hip, 3=L_elbow, 4=R_elbow, 5=L_knee, 6=R_knee, 7=L_ankle, 8=R_ankle. This is
+    /// the 17-message bundle (8 position + 8 rotation + head position). The head is
+    /// position-only (no head rotation — VRChat re-origins off it). In 6-point mode the
+    /// elbow slots 3/4 are simply omitted from the bundle (13 messages).
+    public static let rotationSlots: Set<String> = ["1", "2", "3", "4", "5", "6", "7", "8"]
 
     /// Per-slot LAST-VALID position, keyed by slot id ("1".."8", "head"). When a
     /// joint blips out of detection or the solver yields a degenerate value, the
@@ -59,6 +67,11 @@ public actor OSCSender {
     /// instead. A real (0,0,0) is never emitted. Seeded by the first valid sample;
     /// until then an invalid sample for an unseen slot is dropped (not sent).
     private var lastValidPosition: [String: SIMD3<Float>] = [:]
+    /// Per-slot last good rotation, latched whenever the slot's POSITION is fresh.
+    /// PinoFBT holds the last good value for rotation too; without this a single-frame
+    /// dropout (degenerate ~0 bone ⇒ identity quat ⇒ euler (0,0,0)) snapped that one
+    /// tracker's rotation to identity for the blip while its position correctly held.
+    private var lastValidRotation: [String: SIMD3<Float>] = [:]
 
     public init(host: String, port: Int) {
         self.host = host
@@ -92,7 +105,11 @@ public actor OSCSender {
     /// port at the config layer and the CLI validates it, but guard here too so a
     /// directly-constructed sender can never crash the process.
     public func start() {
-        guard connection == nil else { return }
+        // `stopped` latches an out-of-order start: pipeline.start() fires the configure
+        // Task and stop() fires its own Task with no ordering guarantee, so a start()
+        // landing AFTER stop() must NOT open an orphan connection. A fresh sender is
+        // built each session, so the latch is per-session.
+        guard !stopped, connection == nil else { return }
         guard let portValue = UInt16(exactly: port), portValue >= 1 else {
             return
         }
@@ -128,6 +145,7 @@ public actor OSCSender {
 
     /// Tear down the connection. Idempotent.
     public func stop() {
+        stopped = true                       // block any start() that races in after this
         connection?.stateUpdateHandler = nil
         connection?.cancel()
         connection = nil
@@ -143,8 +161,38 @@ public actor OSCSender {
             // rather than emit a (0,0,0) teleport.
             guard let held = resolveHeldPosition(tracker) else { continue }
             sendPosition(slot: tracker.slot, position: held, over: connection)
-            if rotationEnabled { sendRotation(tracker, over: connection) }
+            // Position-only for the extremities (knees/elbows): only hip/feet/chest
+            // carry rotation, so depth-fragile limb rotation never fights the IK.
+            if rotationEnabled, Self.rotationSlots.contains(tracker.slot) {
+                sendRotation(tracker, over: connection)
+            }
         }
+    }
+
+    /// Send ONE `#bundle` (IMMEDIATELY timetag) carrying the full PinoFBT 1:1 wire:
+    /// for slots 1..8 both `/position` AND `/rotation`, plus `head/position` only —
+    /// exactly the 17-message bundle the captured desktop build emits per frame.
+    /// Applies the same hold-last-valid policy as the unbundled path so a dropout
+    /// never emits a (0,0,0) teleport. Sends nothing if no valid positions exist yet.
+    public func sendPinoBundle(trackers: [OSCTracker], head: OSCTracker?) {
+        guard let connection else { return }
+        var elements: [OSCMessage] = []
+        elements.reserveCapacity(17)
+        for t in trackers {
+            guard let held = resolveHeld(t) else { continue }
+            elements.append(OSCMessage(address: "/tracking/trackers/\(t.slot)/position",
+                                       arguments: [.float(held.position.x), .float(held.position.y), .float(held.position.z)]))
+            elements.append(OSCMessage(address: "/tracking/trackers/\(t.slot)/rotation",
+                                       arguments: [.float(held.rotation.x),
+                                                   .float(held.rotation.y),
+                                                   .float(held.rotation.z)]))
+        }
+        if let head, let held = resolveHeldPosition(head) {
+            elements.append(OSCMessage(address: "/tracking/trackers/head/position",
+                                       arguments: [.float(held.x), .float(held.y), .float(held.z)]))
+        }
+        guard !elements.isEmpty else { return }
+        send(OSCBundle(elements: elements).encoded(), over: connection)
     }
 
     /// Send the head POSITION only — the alignment anchor (matches PinoFBT, which
@@ -170,19 +218,44 @@ public actor OSCSender {
     /// valid position; if none has ever been seen, returns nil so the caller skips
     /// the slot (never emits a fabricated (0,0,0)).
     private func resolveHeldPosition(_ t: OSCTracker) -> SIMD3<Float>? {
-        if Self.isValidPosition(t.position) {
+        if Self.isValidPosition(t.position, slot: t.slot) {
             lastValidPosition[t.slot] = t.position
             return t.position
         }
         return lastValidPosition[t.slot]
     }
 
-    /// A position is valid when every component is finite AND it is not the exact
-    /// origin (a (0,0,0) is the dropout/absent sentinel, never a legitimate pose
-    /// for a centred-frame tracker).
-    private static func isValidPosition(_ p: SIMD3<Float>) -> Bool {
+    /// Position AND rotation under one hold-last-valid policy: when the position is
+    /// fresh (a good solve), emit it and LATCH this frame's rotation; when the position
+    /// is held (a dropout), emit the held position AND the held rotation (so the slot's
+    /// orientation doesn't snap to identity for the blip). Returns nil only if the slot
+    /// has never had a valid sample (caller skips it — never a fabricated (0,0,0)).
+    /// For a fully-valid frame this is byte-identical to emitting the live values.
+    private func resolveHeld(_ t: OSCTracker) -> (position: SIMD3<Float>, rotation: SIMD3<Float>)? {
+        if Self.isValidPosition(t.position, slot: t.slot) {
+            lastValidPosition[t.slot] = t.position
+            let r = t.eulerDegrees
+            if r.x.isFinite, r.y.isFinite, r.z.isFinite { lastValidRotation[t.slot] = r }
+            return (t.position, lastValidRotation[t.slot] ?? Self.finiteOrZero(r))
+        }
+        guard let p = lastValidPosition[t.slot] else { return nil }
+        return (p, lastValidRotation[t.slot] ?? Self.finiteOrZero(t.eulerDegrees))
+    }
+
+    /// The euler unchanged if finite, else zero — so a degenerate NaN/Inf rotation can
+    /// never reach the wire on a slot that hasn't yet latched a valid rotation.
+    private static func finiteOrZero(_ v: SIMD3<Float>) -> SIMD3<Float> {
+        (v.x.isFinite && v.y.isFinite && v.z.isFinite) ? v : .zero
+    }
+
+    /// A position is valid when every component is finite. (0,0,0) is normally the
+    /// dropout sentinel — EXCEPT the hip (slot "2"), whose CORRECT value is exactly
+    /// the origin every frame (it's the root of the normalized tracker space; PinoFBT
+    /// sends (0,0,0)). Without this exemption the hold-last-valid guard froze the hip
+    /// at its seed placeholder so it never tracked.
+    private static func isValidPosition(_ p: SIMD3<Float>, slot: String) -> Bool {
         guard p.x.isFinite, p.y.isFinite, p.z.isFinite else { return false }
-        return p != .zero
+        return slot == "2" || p != .zero
     }
 
     // MARK: - Per-tracker encoding
@@ -198,12 +271,13 @@ public actor OSCSender {
     }
 
     private func sendRotation(_ t: OSCTracker, over connection: NWConnection) {
-        // Three floats = Euler ANGLES IN DEGREES (ZXY), NOT a quaternion.
+        // Three floats = Euler ANGLES IN DEGREES (ZXY), NOT a quaternion. Guard against a
+        // non-finite euler (degenerate ~0 bone) reaching the wire — same policy as the
+        // bundle path; a valid euler is unchanged, so output stays bit-identical.
+        let e = Self.finiteOrZero(t.eulerDegrees)
         let msg = OSCMessage(
             address: "/tracking/trackers/\(t.slot)/rotation",
-            arguments: [.float(t.eulerDegrees.x),
-                        .float(t.eulerDegrees.y),
-                        .float(t.eulerDegrees.z)]
+            arguments: [.float(e.x), .float(e.y), .float(e.z)]
         )
         send(msg.encoded(), over: connection)
     }

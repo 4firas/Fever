@@ -21,9 +21,10 @@ public enum CameraAuthorization: Sendable, Equatable {
 /// does the ABSOLUTE MINIMUM: it copies the latest `CVPixelBuffer` reference into
 /// a single-slot mailbox and returns IMMEDIATELY. It NEVER runs Vision inference
 /// inline and NEVER blocks on a semaphore. A previously stashed-but-unconsumed
-/// frame is overwritten (process-latest-only) and counted as dropped. This keeps
-/// the capture graph — and therefore the `AVCaptureVideoPreviewLayer` preview —
-/// perfectly smooth regardless of how slow downstream inference is.
+/// frame is overwritten (process-latest-only) — that is intentional and keeps the
+/// next inference starting from the freshest frame; it is NOT counted as a drop.
+/// This keeps the capture graph — and therefore the `AVCaptureVideoPreviewLayer`
+/// preview — perfectly smooth regardless of how slow downstream inference is.
 ///
 /// A dedicated inference worker (owned by `TrackingPipeline`) pulls the latest
 /// buffer out of the mailbox via `nextFrame()` and runs Vision off the capture
@@ -35,6 +36,26 @@ public enum CameraAuthorization: Sendable, Equatable {
 /// the capture pool because `alwaysDiscardsLateVideoFrames` plus the single-slot
 /// replacement keep at most one buffer alive outside the pool at a time.
 public final class CameraCapture: NSObject, FrameSource {
+
+    /// Default capture frame-rate cap (fps). 30 by default — smooth, light, and plenty
+    /// for body pose, and it keeps a GoPro/Continuity/UVC cam from spinning the capture
+    /// graph (and the PC stream) faster than we need. Overridable per-session via the
+    /// `maxFPS` property (driven by `TrackingConfig.cameraMaxFPS`).
+    public static let defaultCaptureFPS: CMTimeScale = 30
+
+    /// Capture frame-rate cap (fps). The camera runs FASTER than the model infers
+    /// (~10–15 fps): the inference worker pulls latest-only, so a higher capture rate
+    /// means the next inference always starts from a FRESHER frame — which cuts the
+    /// IRL→VR latency floor (frame age). `applyFrameRate` clamps this target into
+    /// whatever the device actually supports (a value outside the device's real ranges
+    /// would abort the process), so any camera — built-in, GoPro, Continuity, UVC — is
+    /// pinned to at most `maxFPS`. DEFAULT 30 (`defaultCaptureFPS`); set from
+    /// `TrackingConfig.cameraMaxFPS` before/while running via `setMaxFPS(_:)`.
+    public var maxFPS: CMTimeScale {
+        get { lock.withLock { _maxFPS } }
+        set { lock.withLock { _maxFPS = newValue } }
+    }
+    private var _maxFPS: CMTimeScale = CameraCapture.defaultCaptureFPS
 
     /// The underlying session. Exposed so a SwiftUI `AVCaptureVideoPreviewLayer`
     /// can attach to it for the full-bleed live preview, per the shared contract.
@@ -50,6 +71,57 @@ public final class CameraCapture: NSObject, FrameSource {
 
     private let videoOutput = AVCaptureVideoDataOutput()
 
+    /// Preferred camera `uniqueID` (e.g. a GoPro/USB webcam chosen in Settings).
+    /// nil → auto-pick the BUILT-IN camera (lowest latency). Set before start to force one.
+    public var preferredDeviceID: String?
+
+    /// All connected video cameras (built-in + external/USB/Continuity), for the
+    /// Settings camera picker. CACHED: a SwiftUI Settings re-render (e.g. each keystroke
+    /// in a text field) calls this, and a synchronous `DiscoverySession` enumeration can
+    /// hitch the main thread (notably while a Continuity camera wakes). The cache is
+    /// invalidated when a device is connected/disconnected.
+    private static let camCacheLock = NSLock()
+    nonisolated(unsafe) private static var camCache: [AVCaptureDevice]?
+    nonisolated(unsafe) private static var camObserversInstalled = false
+
+    public static func availableCameras() -> [AVCaptureDevice] {
+        camCacheLock.withLock {
+            if let cached = camCache { return cached }
+            installCamObserversLocked()
+            var types: [AVCaptureDevice.DeviceType] = [.builtInWideAngleCamera]
+            types.append(.external)
+            types.append(.continuityCamera)
+            let devices = AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video,
+                                                           position: .unspecified).devices
+            camCache = devices
+            return devices
+        }
+    }
+
+    /// Register (once) for device connect/disconnect so the camera list cache is dropped
+    /// when the hardware actually changes. Called under `camCacheLock`.
+    private static func installCamObserversLocked() {
+        guard !camObserversInstalled else { return }
+        camObserversInstalled = true
+        let clear: @Sendable (Notification) -> Void = { _ in camCacheLock.withLock { camCache = nil } }
+        let nc = NotificationCenter.default
+        nc.addObserver(forName: AVCaptureDevice.wasConnectedNotification, object: nil, queue: nil, using: clear)
+        nc.addObserver(forName: AVCaptureDevice.wasDisconnectedNotification, object: nil, queue: nil, using: clear)
+    }
+
+    /// Choose the capture device: the explicitly-preferred one if connected, else the
+    /// BUILT-IN camera. External/virtual cams (OBS Virtual, Continuity, action-cam webcam
+    /// bridges) register as `.external` but are higher-latency or simply wrong for tracking
+    /// — measured: a GoPro in webcam mode is ~430ms glass→frame vs the built-in's ~60–100ms.
+    /// So auto-pick the built-in and only use an external when the user picks it in Settings.
+    private func pickDevice() -> AVCaptureDevice? {
+        let cams = Self.availableCameras()
+        if let id = preferredDeviceID, let d = cams.first(where: { $0.uniqueID == id }) { return d }
+        return AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .unspecified)
+            ?? AVCaptureDevice.default(for: .video)
+            ?? cams.first
+    }
+
     /// Legacy frame sink (FrameSource protocol). Retained for compatibility; in
     /// the live path the inference worker pulls frames from the mailbox via
     /// `nextFrame()` instead, so this is normally left `nil`.
@@ -62,6 +134,17 @@ public final class CameraCapture: NSObject, FrameSource {
         get { lock.withLock { _onFrame } }
         set { lock.withLock { _onFrame = newValue } }
     }
+
+    /// PC REMOTE-inference mode: keep filling the latest-frame mailbox even while `onFrame`
+    /// (the PC H.264 encoder) is set, so the local `TrackingPipeline` worker can ALSO pull
+    /// frames. In remote mode the camera both streams to the PC (onFrame) and drives the Mac
+    /// pipeline that does the smoothing/IK/OSC (mailbox). Default false → unchanged for
+    /// on-device (no onFrame). At most one buffer pinned.
+    public var fanOutMailbox: Bool {
+        get { lock.withLock { _fanOutMailbox } }
+        set { lock.withLock { _fanOutMailbox = newValue } }
+    }
+    private var _fanOutMailbox = false
 
     /// Observed when the resolved authorization state changes (e.g. after the
     /// system permission prompt is answered). Invoked on an arbitrary queue;
@@ -98,8 +181,9 @@ public final class CameraCapture: NSObject, FrameSource {
         lock.withLock { _isInferring = false }
     }
 
-    /// Running count of dropped frames: OS-dropped (late) frames, plus frames
-    /// overwritten in the single-slot mailbox before the worker consumed them.
+    /// Running count of OS-dropped (late) frames. Intentional process-latest-only
+    /// mailbox overwrites are NOT counted — skipping a stale frame to keep the
+    /// freshest one is by design (the source of the low-latency behavior), not a defect.
     public var droppedFrames: Int {
         lock.withLock { _droppedFrames }
     }
@@ -190,6 +274,44 @@ public final class CameraCapture: NSObject, FrameSource {
         }
     }
 
+    /// Bind a preview layer to this camera's session ON the session queue, so the
+    /// (session-mutating) `layer.session =` assignment serializes with `startRunning()` /
+    /// `stopRunning()`.
+    ///
+    /// CRITICAL: `AVCaptureSession` is not safe to mutate from one thread while another
+    /// enumerates it. `AVCaptureVideoPreviewLayer.session = …` internally does
+    /// `addVideoPreviewLayer:` → `commitConfiguration` (a session mutation). If that runs on
+    /// the main thread at the same moment `startRunning()` enumerates the session's
+    /// connections on the session queue, the process ABORTS with
+    /// `__NSFastEnumerationMutationHandler` ("collection mutated while being enumerated").
+    /// That exact race aborted on-device Start. The layer is created/configured (gravity,
+    /// frame, mirror transform) on the main thread by the caller — only the session bind,
+    /// the one operation that touches the session, is deferred onto this queue.
+    public func attachPreview(_ layer: AVCaptureVideoPreviewLayer, to session: AVCaptureSession) {
+        // Both are non-Sendable AVFoundation objects; this hop deliberately serializes
+        // their use with the rest of the session's lifecycle on `sessionQueue`.
+        nonisolated(unsafe) let lyr = layer
+        nonisolated(unsafe) let sess = session
+        sessionQueue.async {
+            if lyr.session !== sess { lyr.session = sess }
+        }
+    }
+
+    /// Unbind a preview layer from this session on the session queue, BEFORE the layer is
+    /// deallocated. `layer.session = nil` runs `removeVideoPreviewLayer:`, which cleanly
+    /// tears the layer's `CAImageQueue` out of the capture graph. Without it, dismantling the
+    /// SwiftUI preview (a mode switch / `session`-change / Stop) frees the layer while the
+    /// session still references its image queue, and the next `stopRunning()` SEGFAULTS in
+    /// `CAImageQueueInvalidate` — especially with an external GoPro/virtual camera, whose CMIO
+    /// graph teardown is fragile. The async closure retains `layer` until the unbind runs, so
+    /// the layer can't deallocate mid-detach; serialized on `sessionQueue` with start/stop.
+    public func detachPreview(_ layer: AVCaptureVideoPreviewLayer) {
+        nonisolated(unsafe) let lyr = layer
+        sessionQueue.async {
+            if lyr.session !== nil { lyr.session = nil }
+        }
+    }
+
     // MARK: - Mailbox API (consumed by the inference worker)
 
     /// Pull the latest unconsumed frame, clearing the mailbox. Returns `nil`
@@ -232,9 +354,8 @@ public final class CameraCapture: NSObject, FrameSource {
         _session.beginConfiguration()
         _session.sessionPreset = .hd1280x720   // 720p: ample for body pose, fast.
 
-        // Built-in / front camera. Default video device, NOT a back-position
-        // lookup (which is nil on a Mac).
-        guard let device = AVCaptureDevice.default(for: .video),
+        // Preferred external camera (GoPro/USB) if present, else built-in default.
+        guard let device = pickDevice(),
               let input = try? AVCaptureDeviceInput(device: device),
               _session.canAddInput(input) else {
             _session.commitConfiguration()
@@ -242,22 +363,16 @@ public final class CameraCapture: NSObject, FrameSource {
         }
         _session.addInput(input)
 
-        // Force a STEADY 30fps (this webcam's hardware max). Locking min == max
-        // frame duration stops auto-exposure from dropping the capture rate in
-        // lower light — that throttling was pinning the pipeline to ~17fps. We
-        // do NOT touch activeFormat (the preset already gives 720p and changing
-        // the format manually breaks frame delivery on this SDK); we only pin the
-        // frame duration, so frame delivery is unchanged and there's no accuracy
-        // cost.
-        if (try? device.lockForConfiguration()) != nil {
-            if device.activeFormat.videoSupportedFrameRateRanges
-                .contains(where: { $0.maxFrameRate >= 30 }) {
-                let thirty = CMTime(value: 1, timescale: 30)
-                device.activeVideoMinFrameDuration = thirty
-                device.activeVideoMaxFrameDuration = thirty
-            }
-            device.unlockForConfiguration()
-        }
+        // Force a STEADY capture rate. Locking min == max frame duration stops
+        // auto-exposure from dropping the capture rate in lower light (that
+        // throttling once pinned the pipeline to ~17fps). We do NOT touch
+        // activeFormat (the preset already gives 720p and changing the format
+        // manually breaks frame delivery on this SDK); we only pin the frame
+        // duration. Capture is capped at `maxFPS` (default 30) — still FASTER than
+        // the model infers — so the latest-only worker always grabs the freshest
+        // frame and the IRL→VR latency floor is minimized.
+        applyFrameRate(to: device)
+        minimizeLatencyEffects(on: device)
 
         videoOutput.videoSettings = [
             kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
@@ -273,6 +388,96 @@ public final class CameraCapture: NSObject, FrameSource {
 
         _session.commitConfiguration()
         lock.withLock { isConfigured = true }
+    }
+
+    /// Pin the capture device toward `maxFPS`, but ONLY to a frame duration the device's
+    /// active format actually supports. Setting `activeVideoMin/MaxFrameDuration` to a
+    /// value outside `videoSupportedFrameRateRanges` throws an UNCATCHABLE ObjC
+    /// `NSException` → the process aborts. Virtual/DAL cameras (DroidCam, OBS,
+    /// Continuity) and many external webcams cap below 30, so we clamp our desired
+    /// 1/maxFPS into the device's real CMTime bounds (and skip entirely if it advertises
+    /// no ranges, letting the device run free).
+    private func applyFrameRate(to device: AVCaptureDevice) {
+        guard (try? device.lockForConfiguration()) != nil else { return }
+        defer { device.unlockForConfiguration() }
+
+        // Prefer the range with the highest capability (fastest supported fps).
+        guard let range = device.activeFormat.videoSupportedFrameRateRanges
+                .max(by: { $0.maxFrameRate < $1.maxFrameRate }) else {
+            return   // device exposes no frame-rate control → leave it alone
+        }
+
+        // Desired = 1/maxFPS, clamped into [minFrameDuration, maxFrameDuration] using the
+        // device's EXACT CMTime bounds (so the value is always in-range and can never
+        // trigger the exception). minFrameDuration = the SHORTEST duration = the FASTEST
+        // fps the device supports — so clamping our (longer) 1/30 against it caps the cam
+        // at 30 even when it can do 60+, while never asking for more than it can deliver.
+        var duration = CMTime(value: 1, timescale: max(1, maxFPS))
+        if CMTimeCompare(duration, range.minFrameDuration) < 0 { duration = range.minFrameDuration }
+        if CMTimeCompare(duration, range.maxFrameDuration) > 0 { duration = range.maxFrameDuration }
+        guard duration.isValid, duration.isNumeric else { return }
+
+        device.activeVideoMinFrameDuration = duration
+        device.activeVideoMaxFrameDuration = duration
+    }
+
+    /// Kill the macOS camera "video effects" that add per-frame processing latency.
+    /// On Apple-silicon built-in cameras these run on the live feed and are the main
+    /// controllable latency adder (the 30fps frame period is fixed — the sensor has no
+    /// faster format). Center Stage reframes/crops through an extra pass: we take APP
+    /// control of it and force it OFF so the system can't silently re-enable it for
+    /// tracking. Reactions runs continuous hand-gesture detection on every frame but is
+    /// system-owned (no app setter) — we can only detect it and tell the user to turn it
+    /// off in Control Center ▸ Video Effects, which is a real latency win when it's on.
+    private func minimizeLatencyEffects(on device: AVCaptureDevice) {
+        if device.activeFormat.isCenterStageSupported {
+            AVCaptureDevice.centerStageControlMode = .app
+            AVCaptureDevice.isCenterStageEnabled = false
+        }
+        if #available(macOS 14.0, *), AVCaptureDevice.reactionEffectsEnabled {
+            NSLog("[Fever camera] ⚠︎ Reactions video-effect is ON — it runs per-frame gesture "
+                + "detection and adds latency. Turn it OFF in Control Center ▸ Video Effects for lowest lag.")
+        }
+    }
+
+    /// Update the capture frame-rate cap and re-apply it to the live device (if the
+    /// session is already configured), so a Settings change takes effect without a
+    /// restart. Serialized on the session queue alongside the other session mutations.
+    public func setMaxFPS(_ fps: Int) {
+        let ts = CMTimeScale(min(240, max(1, fps)))
+        nonisolated(unsafe) let capture = self
+        sessionQueue.async {
+            capture.maxFPS = ts
+            guard capture.lock.withLock({ capture.isConfigured }), let device = capture.pickDevice() else { return }
+            capture.applyFrameRate(to: device)
+        }
+    }
+
+    /// Switch the active camera live (Settings picker). Swaps the session's video
+    /// input on the session queue; if not yet configured, just records the choice
+    /// so the next `start()` uses it.
+    public func selectCamera(_ deviceID: String?) {
+        sessionQueue.async { [weak self] in
+            guard let self else { return }
+            self.preferredDeviceID = deviceID
+            guard self.lock.withLock({ self.isConfigured }) else { return }
+            // Build the NEW input BEFORE removing the working one — if the requested
+            // device can't be opened, keep the current camera running instead of
+            // tearing it down into a frameless (silently green) session.
+            guard let device = self.pickDevice(),
+                  let input = try? AVCaptureDeviceInput(device: device) else { return }
+            self._session.beginConfiguration()
+            let previous = self._session.inputs
+            for old in previous { self._session.removeInput(old) }
+            if self._session.canAddInput(input) {
+                self._session.addInput(input)
+                self.applyFrameRate(to: device)
+            } else {
+                // Roll back to the previous input(s) so we never end input-less.
+                for old in previous where self._session.canAddInput(old) { self._session.addInput(old) }
+            }
+            self._session.commitConfiguration()
+        }
     }
 }
 
@@ -296,14 +501,26 @@ extension CameraCapture: AVCaptureVideoDataOutputSampleBufferDelegate {
         // Retain the CoreVideo pixel buffer in the mailbox. The CMSampleBuffer
         // itself is NOT retained past this call; the CVPixelBuffer is a separate
         // reference-counted CV object and is safe to hold.
-        lock.withLock {
-            if pendingBuffer != nil {
-                // The worker hadn't consumed the previous frame yet — drop it.
-                _droppedFrames += 1
+        let sink: ((CVPixelBuffer, TimeInterval) -> Void)? = lock.withLock {
+            // Overwriting an unconsumed frame is INTENTIONAL (process-latest-only:
+            // always keep the freshest frame for the lowest latency), so it is NOT a
+            // dropped frame and is not counted — only OS-dropped late frames (the
+            // didDrop callback) are real drops worth surfacing.
+            //
+            // When a live sink is set (PC-offload siphons frames straight to the
+            // encoder), the pull mailbox is never drained — so don't pin a second pool
+            // buffer in it; that only raises late-drop pressure for no consumer.
+            if _onFrame == nil || _fanOutMailbox {
+                pendingBuffer = pixelBuffer
+                pendingTime = time
             }
-            pendingBuffer = pixelBuffer
-            pendingTime = time
+            return _onFrame
         }
+        // Secondary tap: in PC-offload mode the controller sets `onFrame` to siphon
+        // frames to the ffmpeg encoder. nil in the local path, so this is a no-op
+        // there. The sink MUST be non-blocking (it stashes for an async encoder) —
+        // it must never run inference or block the capture queue.
+        sink?(pixelBuffer, time)
     }
 
     /// The OS dropped a late frame before delivery — count it.

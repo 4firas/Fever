@@ -55,6 +55,19 @@ let package = Package(
                 .swiftLanguageMode(.v6),
                 .unsafeFlags(["-parse-as-library"])
             ]
+        ),
+        // Headless integration harness for PC REMOTE-inference mode: drives the REAL Mac
+        // pipeline (RemoteNLFSource → TrackingPipeline → OSCSender) with a StubFrameSource,
+        // fed live poses from a running `fbt_daemon --raw`, OSC → 127.0.0.1 so the bundles can
+        // be captured + verified. `swift run RemoteCheck <posePort> <oscPort> <seconds>`.
+        .executableTarget(
+            name: "RemoteCheck",
+            dependencies: ["FeverCore"],
+            path: "Tests/RemoteCheck",
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+                .unsafeFlags(["-parse-as-library"])
+            ]
         )
     ]
 )

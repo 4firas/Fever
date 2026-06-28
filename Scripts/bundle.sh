@@ -88,6 +88,10 @@ cat > "${CONTENTS}/Info.plist" <<'PLIST'
     <string>26.0</string>
     <key>NSCameraUsageDescription</key>
     <string>Fever uses the camera to track your full body and stream it to VRChat.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Fever sends VRChat trackers over OSC/UDP and connects to your tracking PC on your local network.</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.utilities</string>
 </dict>
 </plist>
 PLIST
@@ -95,27 +99,17 @@ PLIST
 # --- 5. Write PkgInfo --------------------------------------------------------
 printf 'APPL????' > "${CONTENTS}/PkgInfo"
 
-# --- 5a. Embed the MediaPipe sidecar (Python 3.12 + deps) + pose model -------
-echo "==> Embedding sidecar (Python + mediapipe) + pose model…"
-mkdir -p "${RESOURCES_DIR}/Models"
-cp "${PROJECT_ROOT}/Models/pose_landmarker_full.task" "${RESOURCES_DIR}/Models/"
-"${PROJECT_ROOT}/Scripts/stage-embedded-python.sh" "${RESOURCES_DIR}/sidecar"
+# NOTE: Fever runs the NLF pose model through an EXTERNAL onnxruntime sidecar
+# (resolved at runtime from $FEVER_NLF_ROOT, default
+# ~/Documents/Projects/Fever/nlf-runtime). The model is non-distributable, so
+# nothing is embedded in the .app — there is no bundled Python/sidecar to stage
+# or sign.
 
 # --- 5b. Strip extended attributes -------------------------------------------
 # Finder/Spotlight can attach a com.apple.FinderInfo (and other) xattrs to the
 # bundle, which makes `codesign --verify --strict` reject it as "detritus".
 # Clear them recursively before signing so verification stays reliable.
 xattr -cr "${APP_DIR}"
-
-# --- 5c. Sign every embedded mach-O inside-out (BEFORE the app seal) ----------
-# So `codesign --verify --strict` accepts the bundle, and the spawned python
-# (signed ad-hoc, no hardened runtime) loads its own ad-hoc-signed .so/.dylib
-# freely. The app itself carries disable-library-validation (see entitlements).
-echo "==> Signing embedded sidecar mach-O (inside-out)…"
-find "${RESOURCES_DIR}/sidecar" -type f \( -name "*.so" -o -name "*.dylib" \) -print0 \
-  | xargs -0 -P4 -I{} codesign --force -s - "{}" 2>/dev/null || true
-find "${RESOURCES_DIR}/sidecar/python/bin" -type f -name "python3*" -print0 \
-  | xargs -0 -I{} codesign --force -s - "{}" 2>/dev/null || true
 
 # --- 6. Ad-hoc codesign (AFTER Info.plist), in the off-volume temp dir -------
 echo "==> Codesigning (ad-hoc, hardened runtime, with entitlements) in ${BUILD_DIR}…"

@@ -1,11 +1,10 @@
 import FeverCore
 import Foundation
 
-/// Runs the full tracking pipeline with no GUI: camera (or stub) -> Vision (or
-/// stub) -> One-Euro -> JointSolver -> SLERP -> CoordinateMapper ->
-/// TrackerAssembler -> OSCSender. Prints periodic telemetry (FPS, dropped
-/// frames, a few live joints) to stdout and shuts down cleanly on SIGINT /
-/// SIGTERM.
+/// Runs the full tracking pipeline with no GUI: camera (or stub) -> NLF pose
+/// (onnxruntime sidecar, or stub) -> OneEuro -> PinoSolver -> OSCSender. Prints
+/// periodic telemetry (FPS, dropped frames, a few live trackers) to stdout and
+/// shuts down cleanly on SIGINT / SIGTERM.
 ///
 /// The pipeline is a `@MainActor @Observable` object, so telemetry is sampled on
 /// the main actor from a repeating timer rather than via Combine publishers.
@@ -23,23 +22,21 @@ final class HeadlessRunner {
 
     private let config: TrackingConfig
     private let source: FrameSource
-    private let landmarker: PoseLandmarker
+    private let landmarker: any NLFPoseSource
     private let autoCalibrateAfter: TimeInterval?
 
     /// Telemetry sample period (seconds).
     private let telemetryInterval: TimeInterval = 1.0
 
-    /// - Parameter autoCalibrateAfter: when non-nil, fire a one-shot Recenter
-    ///   (rest-pose capture for the rest-relative rotation rebaser + scale/floor
-    ///   re-latch) this many seconds after start. Used by the synthetic `--stub`
-    ///   run so the streamed `/rotation` is the CALIBRATED, rest-relative euler the
-    ///   user gets after Recenter (≈ 0 at the rest pose, bounded under motion),
-    ///   rather than the uncalibrated absolute orientation (which legitimately
-    ///   reads ±180 for limbs hanging straight down — a true 180° Y-flip, not a
-    ///   defect). nil (live tracking) leaves calibration to the user's Recenter.
+    /// - Parameter autoCalibrateAfter: when non-nil, fire a one-shot Recenter this
+    ///   many seconds after start. Recenter resets the smoother + clears the solver's
+    ///   elbow-hold (PinoFBT 1:1 — it does NOT rebase to a rest pose; rotations stay
+    ///   ABSOLUTE Unity ZXY and VRChat re-origins the body via head/position). Used by
+    ///   the synthetic `--stub` run so the smoother re-seeds cleanly before the streamed
+    ///   `/rotation` is checked. nil (live tracking) leaves Recenter to the user.
     init(config: TrackingConfig,
          source: FrameSource,
-         landmarker: PoseLandmarker,
+         landmarker: any NLFPoseSource,
          autoCalibrateAfter: TimeInterval? = nil) {
         self.config = config
         self.source = source
@@ -104,7 +101,7 @@ private final class Driver {
 
     init(config: TrackingConfig,
          source: FrameSource,
-         landmarker: PoseLandmarker,
+         landmarker: any NLFPoseSource,
          telemetryInterval: TimeInterval,
          autoCalibrateAfter: TimeInterval?) {
         self.telemetryInterval = telemetryInterval
@@ -122,8 +119,8 @@ private final class Driver {
     }
 
     /// One-shot Recenter `autoCalibrateAfter` seconds after start (stub/headless
-    /// verification only). Captures the rest pose for the rest-relative rotation
-    /// rebaser so the streamed `/rotation` is the calibrated, zero-centered euler.
+    /// verification only). Resets the smoother + solver elbow-hold so the stub stream
+    /// re-seeds cleanly — it does NOT rebase rotations (those stay absolute Unity ZXY).
     private func scheduleAutoCalibrate() {
         guard let delay = autoCalibrateAfter else { return }
         let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -155,24 +152,24 @@ private final class Driver {
     private func sampleAndPrint() {
         let fps = pipeline.fps
         let dropped = pipeline.droppedFrames
-        let joints = pipeline.lastFrameJoints
+        let trackers = pipeline.liveTrackers
 
         // Only print when something meaningful changed.
         let fpsChanged = abs(fps - lastFPS) >= 0.5
         let dropChanged = dropped != lastDropped
-        guard fpsChanged || dropChanged || !joints.isEmpty else { return }
+        guard fpsChanged || dropChanged || !trackers.isEmpty else { return }
 
         lastFPS = fps
         lastDropped = dropped
 
         var line = String(format: "[Fever] %5.1f fps  drops %d", fps, dropped)
-        if joints.isEmpty {
+        if trackers.isEmpty {
             line += "  (no pose)"
         } else {
-            for j in joints.prefix(3) {
-                let p = j.position
+            for t in trackers.prefix(3) {
+                let p = t.position
                 line += String(format: "  %@(%.2f,%.2f,%.2f)",
-                               j.type.rawValue, p.x, p.y, p.z)
+                               t.joint.rawValue, p.x, p.y, p.z)
             }
         }
         print(line)

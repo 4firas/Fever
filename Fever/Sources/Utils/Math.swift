@@ -2,38 +2,6 @@ import simd
 
 // MARK: - SIMD quaternion / matrix helpers used across the pipeline
 
-/// Build a right-handed rotation quaternion from an orthonormal frame.
-/// `forward` = bone direction (local +Y), `right` = local +X, `up` = local +Z.
-@inlinable
-public func quaternionFromFrame(forward: SIMD3<Float>,
-                                right: SIMD3<Float>,
-                                up: SIMD3<Float>) -> simd_quatf {
-    // Columns: right, forward, up  → 3x3 rotation
-    let m = simd_float3x3(columns: (right, forward, up))
-    return simd_quatf(m)
-}
-
-/// Quaternion from a single bone direction, using `worldUp` as a reference
-/// to derive a stable, **right-handed** orthonormal frame. Falls back to an
-/// alternate reference axis when the bone is parallel to `worldUp` (which
-/// would otherwise produce a reflection matrix → NaN from `simd_quatf`).
-@inlinable
-public func quaternionFromBone(direction: SIMD3<Float>,
-                               worldUp: SIMD3<Float> = SIMD3<Float>(0, 1, 0)) -> simd_quatf {
-    var forward = simd_normalize(direction)
-    if !(forward.x.isFinite && forward.y.isFinite && forward.z.isFinite) {
-        forward = SIMD3<Float>(0, 0, 1)
-    }
-    var upRef = worldUp
-    if abs(simd_dot(forward, upRef)) > 0.999 {
-        upRef = SIMD3<Float>(0, 0, 1)   // bone ∥ worldUp → swap reference
-    }
-    let right = simd_normalize(simd_cross(forward, upRef))   // forward × upRef
-    let up    = simd_cross(right, forward)                    // right × forward
-    // columns (right, forward, up) with right×forward = up → right-handed ✓
-    return quaternionFromFrame(forward: forward, right: right, up: up)
-}
-
 /// Build a right-handed rotation quaternion from TWO in-body direction vectors
 /// (the PinoFBT / ju1ce Mediapipe-VR-Fullbody-Tracking recipe), with NO world-up
 /// reference and NO fabricated roll. `primary` becomes the frame's local +Y (the
@@ -44,10 +12,9 @@ public func quaternionFromBone(direction: SIMD3<Float>,
 ///   y = normalize(primary)
 ///   z = cross(normalize(secondary), y)
 ///   if |z| < 1e-4  → primary ∥ secondary (degenerate): return `holdLast` — we
-///                    do NOT fabricate a roll from world-up (the old
-///                    `quaternionFromBone` singularity that pinned hip roll and
-///                    snapped 90° when a limb stood vertical). Holding the last
-///                    good orientation is bounded and continuous.
+///                    do NOT fabricate a roll from a world-up reference (which would
+///                    pin hip roll and snap 90° when a limb stood vertical). Holding
+///                    the last good orientation is bounded and continuous.
 ///   z = normalize(z);  x = cross(y, z)
 ///   quat = simd_quatf(columns: (x, y, z))
 ///
@@ -74,41 +41,6 @@ public func frameFromTwoAxes(primary: SIMD3<Float>,
         return holdLast
     }
     return q
-}
-
-/// Build a rotation from a bone direction plus a reference perpendicular,
-/// but fall back to `quaternionFromBone(direction:)` when the two vectors are
-/// (near-)parallel and the cross product is degenerate. Prevents NaN quats on
-/// straight limbs (collinear shoulder→elbow→wrist, etc.). Frame is built
-/// right-handed so `simd_quatf` never gets a reflection matrix.
-@inlinable
-public func quaternionFromBoneSafe(direction: SIMD3<Float>,
-                                   reference: SIMD3<Float>,
-                                   worldUp: SIMD3<Float> = SIMD3<Float>(0, 1, 0)) -> simd_quatf {
-    let boneDir = simd_normalize(direction)
-    let refDir  = simd_normalize(reference)
-    let normal  = simd_cross(boneDir, refDir)
-    guard simd_length(normal) > 1e-4 else {
-        return quaternionFromBone(direction: boneDir, worldUp: worldUp)
-    }
-    let up    = simd_normalize(normal)
-    let right = simd_cross(boneDir, up)          // right-handed: right×forward = up
-    return quaternionFromFrame(forward: boneDir, right: right, up: up)
-}
-
-/// Slerp wrapper that guards against NaN / zero-length quats.
-@inlinable
-public func safeSlerp(_ a: simd_quatf, _ b: simd_quatf, _ t: Float) -> simd_quatf {
-    if simd_length(a.vector) < 1e-6 { return b }
-    if simd_length(b.vector) < 1e-6 { return a }
-    return simd_slerp(a, b, t)
-}
-
-/// Angle (radians) between two vectors, clamped for numerical safety.
-@inlinable
-public func angleBetween(_ a: SIMD3<Float>, _ b: SIMD3<Float>) -> Float {
-    let d = simd_clamp(simd_dot(simd_normalize(a), simd_normalize(b)), -1, 1)
-    return acos(d)
 }
 
 // MARK: - VRChat ZXY Euler conversion
@@ -176,11 +108,44 @@ public func quaternionToEulerZXYDegrees(_ q: simd_quatf) -> SIMD3<Float> {
     return SIMD3<Float>(x * radToDeg, y * radToDeg, z * radToDeg)
 }
 
-/// Convert normalized BlazePose coords (x∈[0,1] y↓, z toward camera) to
-/// VRChat world space (meters, y↑, z forward). RETAINED for the JointSolver's
-/// internal frame; the authoritative VRChat-space conversion now lives in
-/// `CoordinateMapper`.
-@inlinable
-public func normalizedToVRChat(_ p: SIMD3<Float>, scale: Float) -> SIMD3<Float> {
-    SIMD3<Float>(p.x * scale, (1.0 - p.y) * scale, p.z * scale)
+// MARK: - PinoFBT fast_kinematics (exact, reverse-engineered)
+
+/// `get_rotation(u, v)` from PinoFBT's `fast_kinematics` — the shortest-arc
+/// quaternion rotating `u` onto `v`. xyz = cross(u,v), w = dot(u,v)+1, normalize.
+/// **NO `d>0.999999` early-out** (it drops the tiny residual that propagates
+/// through the IK composition — that omission was the old spine's ~10° error).
+/// True-antiparallel (|q|<1e-12) → 180° about a perpendicular axis. Byte-exact
+/// vs the compiled Numba core. Delegates to `PinoKinematics.getRotation`.
+public func shortestArc(_ u: SIMD3<Float>, _ v: SIMD3<Float>) -> simd_quatf {
+    let lu = simd_length(u), lv = simd_length(v)
+    guard lu > 1e-6, lv > 1e-6 else { return simd_quatf(ix: 0, iy: 0, iz: 0, r: 1) }
+    let q = PinoKinematics.getRotation(u, v)   // scalar-last (x,y,z,w)
+    return simd_quatf(ix: q.x, iy: q.y, iz: q.z, r: q.w)
+}
+
+/// Convert a scalar-last `SIMD4<Float>` quaternion to `simd_quatf`.
+@inline(__always)
+public func quatfFromScalarLast(_ q: SIMD4<Float>) -> simd_quatf {
+    simd_quatf(ix: q.x, iy: q.y, iz: q.z, r: q.w)
+}
+
+/// PinoFBT `calc_root_rotation` — pelvis/hip orientation, the BYTE-EXACT dual-prim
+/// (spine1 AND spine2) 3-quaternion composition. Uses SMPL joints leftHip(1),
+/// rightHip(2), spine1(3), spine2(6) on the PREPROCESSED joints. `a1` = forward
+/// ref (0,0,1), `a2` = up ref (0,1,0). Delegates to `PinoKinematics`.
+public func calcRootRotation(_ w: [SIMD3<Float>],
+                             a1: SIMD3<Float> = SIMD3<Float>(0, 0, 1),
+                             a2: SIMD3<Float> = SIMD3<Float>(0, 1, 0)) -> simd_quatf {
+    quatfFromScalarLast(PinoKinematics.calcRootRotation(w, a1: a1, a2: a2))
+}
+
+/// PinoFBT `calc_chest_rotation` — chest orientation, the BYTE-EXACT frame-based
+/// 3-quaternion composition. Uses SMPL joints leftCollar(13), rightCollar(14),
+/// spine3(9) on the PREPROCESSED joints. `a1` = forward (0,0,1); `a2` = X-axis
+/// (1,0,0). Returns only the quat; use `PinoKinematics.calcChestRotation` for the
+/// residual (the arm solver's `in0`). Delegates to `PinoKinematics`.
+public func calcChestRotation(_ w: [SIMD3<Float>],
+                              a1: SIMD3<Float> = SIMD3<Float>(0, 0, 1),
+                              a2: SIMD3<Float> = SIMD3<Float>(1, 0, 0)) -> simd_quatf {
+    quatfFromScalarLast(PinoKinematics.calcChestRotation(w, a1: a1, a2: a2).quat)
 }

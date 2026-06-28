@@ -36,12 +36,17 @@ enum Theme {
     static let good             = Color(hex: 0xaeffa4)
     /// Lost / error soft red (#c35951).
     static let lost             = Color(hex: 0xc35951)
-    /// Acquiring / warning yellow (#fff600) — use sparingly.
-    static let warning          = Color(hex: 0xfff600)
+    /// Acquiring / warning — warm amber (#e0a24a), on the kurokula palette (not the
+    /// old neon #fff600 that read like a default warning swatch). Use sparingly.
+    static let warning          = Color(hex: 0xe0a24a)
     /// Info cyan (#8fcfcf).
     static let info             = Color(hex: 0x8fcfcf)
     /// Calm blue (#5f7faf).
     static let calmBlue         = Color(hex: 0x5f7faf)
+
+    /// PinoQuest-style skeleton joint coloring: cyan = body-LEFT, orange = body-RIGHT.
+    static let trackerLeft      = Color(hex: 0x4fd6e6)
+    static let trackerRight     = Color(hex: 0xff9d42)
 
     // MARK: Type scale (12–16pt, clear weight hierarchy)
 
@@ -75,28 +80,30 @@ extension Color {
 
 /// A tracker's live state, used for status dots / pill tints across the UI.
 enum TrackerState {
-    case tracking   // strong live confidence
-    case acquiring  // weak live confidence
-    case lost       // enabled but no live data
-    case idle       // not enabled
+    case tracking   // enabled and streaming live solved data
+    case lost       // enabled but no live data (session stopped / no body)
+    case idle       // not part of the active tracker set
 
-    /// Maps a live joint (or its absence) + enabled flag into a state.
-    static func resolve(live: VRJoint?, enabled: Bool) -> TrackerState {
+    /// Maps "is this tracker in the active set" + "is it streaming live" into a state.
+    static func resolve(enabled: Bool, live: Bool) -> TrackerState {
         guard enabled else { return .idle }
-        guard let live else { return .lost }
-        switch live.confidence {
-        case ..<0.4:  return .lost
-        case ..<0.75: return .acquiring
-        default:      return .tracking
-        }
+        return live ? .tracking : .lost
     }
 
     var color: Color {
         switch self {
         case .tracking:  return Theme.good
-        case .acquiring: return Theme.warning
         case .lost:      return Theme.lost
         case .idle:      return Theme.textMuted
+        }
+    }
+
+    /// Spoken state for VoiceOver / color-blind users (state must not be color-only).
+    var label: String {
+        switch self {
+        case .tracking:  return "tracking"
+        case .lost:      return "no signal"
+        case .idle:      return "off"
         }
     }
 }
@@ -190,5 +197,19 @@ struct ConfidenceBar: View {
             }
         }
         .frame(height: 5)
+    }
+}
+
+extension PCOffloadController.Phase {
+    /// The status-dot color for this offload phase — single source of truth for the
+    /// sidebar SessionPanel, the control-bar capsule, and the Settings status line
+    /// (kept here in the App module so it can reach both the FeverCore Phase and Theme).
+    var dotColor: Color {
+        switch self {
+        case .streaming:                    return Theme.good
+        case .waking, .starting, .stopping: return Theme.warning
+        case .error:                        return Theme.crimsonBright
+        case .idle:                         return Theme.textMuted
+        }
     }
 }

@@ -8,7 +8,7 @@ import FeverCore
 /// full production chain (lift → solve → rest-relative rebase → map → assemble),
 /// and asserting the PinoFBT rotation contract:
 ///
-///   • `/rotation` IS present for body slots 1-8 (rotation re-enabled),
+///   • `/rotation` IS present for ALL 8 body trackers (PinoFBT parity),
 ///   • NO `head/rotation` is ever emitted (head is position-only),
 ///   • euler values are BOUNDED (not pinned at ±180),
 ///   • NO (0,0,0) positions,
@@ -52,34 +52,21 @@ enum RotationWireStub {
                        v: SIMD3<Float>(f(0), f(4), f(8)))
     }
 
-    /// Build the assembled body trackers + head from the production chain on a
-    /// realistic upright pose, with rotation populated by the full rest-relative
-    /// rebase chain (mirrors FrameProcessor). Returns nil if the lift fails.
+    /// Build the body trackers + head from the LIVE 1:1 chain on a synthetic
+    /// standing SMPL-24 pose: OneEuro → `PinoSolver` → the desktop slot map
+    /// (position + ZXY euler per slot), exactly as `FrameProcessor` does. Returns
+    /// all 8 numbered slots + the position-only head.
     static func assembleWithRotation() -> (body: [OSCTracker], head: OSCTracker?)? {
-        let (raw, present, image) = GeometrySanity.makeUprightRaw()
-        let liftEngine = MonocularDepthLift(referenceHeight: 1.8)
-        guard let pose = GeometrySanity.lift(raw, present, image, using: liftEngine) else {
-            return nil
+        let pose = StubNLFLandmarker.standing(timestamp: 0)
+        let smoothed = TwoEuroJointSmoother().smooth(pose.joints3D, timestamp: 0)
+        let solved = PinoSolver(heightCm: 174).solve(joints: smoothed, tracked: true)
+        var body: [OSCTracker] = []
+        for slot in TrackerMapPino.slots {
+            let pos = solved.slotPositions[slot.index] ?? .zero
+            let eul = solved.slotEulers[slot.index] ?? .zero
+            body.append(OSCTracker(slot: slot.path, position: pos, eulerDegrees: eul))
         }
-        let cfg = TrackingConfig()
-        cfg.mirrorTracking = false
-        cfg.userHeightMeters = 1.74
-        let state = RotationState()
-        let solver = JointSolver(settings: cfg, rotationState: state)
-        let rebaser = RotationRebaser(smoothingFactor: cfg.rotationSmoothingF)
-        var joints = solver.solve(pose)
-        // Rest-relative rebase (no rest captured yet → identity rest = absolute,
-        // hemisphere-locked + smoothed) exactly as the live processor does.
-        for i in joints.indices where joints[i].type != .head {
-            joints[i].rotation = rebaser.rebase(joints[i].type,
-                                                live: joints[i].rotation,
-                                                captureNow: false)
-        }
-        let mapper = CoordinateMapper(userHeightMeters: 1.74,
-                                      referenceHeightMeters: 1.8,
-                                      mirrorHorizontally: false)
-        let assembler = TrackerAssembler(enabled: cfg.enabledJoints, slotMap: cfg.slotMap)
-        let (body, head) = assembler.assemble(joints, mapper: mapper)
+        let head = OSCTracker(slot: "head", position: solved.headPosition, eulerDegrees: .zero)
         return (body, head)
     }
 
@@ -173,13 +160,17 @@ enum RotationWireStub {
             if !cond { ok = false }
         }
 
-        // (a) /rotation present for ALL 8 body slots.
+        // (a) /rotation present for ALL 8 body trackers (PinoFBT parity). The
+        //     per-bone rotation solver is fixed (spine-aligned chest, heel→toe feet
+        //     with roll locked), so every numbered tracker carries a real rotation.
         let expectBody = Set(["1", "2", "3", "4", "5", "6", "7", "8"])
         require(bodyRotSlots == expectBody,
-                "/rotation must be present for body slots 1-8: got \(bodyRotSlots.sorted())")
+                "/rotation must be present for all 8 body slots: got \(bodyRotSlots.sorted())")
         // (b) NO head/rotation.
         require(headRot.isEmpty, "head/rotation must NEVER be emitted (got \(headRot.count))")
-        // (c) euler BOUNDED (not pinned at ±180) and finite.
+        // (c) euler FINITE and within the valid degree range [-180, 180]. (The 1:1
+        //     wire is ABSOLUTE euler — a straight limb legitimately reads ±180, so
+        //     we no longer forbid that; we only require finite, in-range values.)
         var minE = SIMD3<Float>(repeating: .greatestFiniteMagnitude)
         var maxE = SIMD3<Float>(repeating: -.greatestFiniteMagnitude)
         var pinned = 0
@@ -188,14 +179,16 @@ enum RotationWireStub {
                     "rotation slot \(r.slot) non-finite: \(r.v)")
             for a in 0..<3 {
                 minE[a] = min(minE[a], r.v[a]); maxE[a] = max(maxE[a], r.v[a])
+                require(abs(r.v[a]) <= 180.001, "rotation slot \(r.slot) euler out of range: \(r.v)")
                 if abs(abs(r.v[a]) - 180) < 0.5 { pinned += 1 }
             }
         }
-        require(pinned == 0, "\(pinned) euler component(s) pinned at ±180 (rotation must be bounded)")
-        // (d) NO (0,0,0) positions on any slot (head included).
+        // (d) NO (0,0,0) positions on any slot EXCEPT the hip ("2"), whose correct
+        //     value IS the origin (root of the normalized tracker space; PinoFBT
+        //     also sends (0,0,0) for the hip every frame).
         var zeros = 0
-        for p in positions where p.v == .zero { zeros += 1 }
-        require(zeros == 0, "\(zeros) (0,0,0) position sample(s) on the wire")
+        for p in positions where p.v == .zero && p.slot != "2" { zeros += 1 }
+        require(zeros == 0, "\(zeros) (0,0,0) non-hip position sample(s) on the wire")
         // (e) head POSITION present (the anchor).
         require(positions.contains { $0.slot == "head" }, "head position never reached the wire")
 

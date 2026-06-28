@@ -31,3 +31,25 @@ pi-session-recap.md
 .vrchat-fixes.js
 docs/
 Package.resources/
+*.onnx
+.coreml_cache/
+**/.venv/
+*.coreml
+
+# Non-distributable reverse-engineered model IP + heavy local media (never commit)
+fbt_re/
+fever-media/
+# Gated SMPL-X body models (license-restricted; user-provided locally, never redistribute)
+models/
+*.pkl
+*.npz
+*.pyd
+*.engine
+*.enc
+
+# PC offload daemon (PinoFBT-derived, non-distributable)
+pc-daemon/
+
+# On-device NLF runtime (venv + non-distributable model)
+nlf-runtime/
+LOOP_LOG.md

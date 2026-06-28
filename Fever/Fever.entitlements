@@ -5,12 +5,13 @@
 <dict>
     <key>com.apple.security.device.camera</key>
     <true/>
-    <key>com.apple.security.device-motion</key>
-    <true/>
     <key>com.apple.security.network.client</key>
     <true/>
+    <!-- PCSkeletonReceiver binds an inbound UDP listener (the PC's returned skeleton),
+         so the app is a network SERVER too. Harmless while the sandbox is off; honest
+         and necessary if the app is ever sandboxed. -->
     <key>com.apple.security.network.server</key>
-    <false/>
+    <true/>
     <!-- The app spawns an embedded Python sidecar that loads many ad-hoc-signed
          .so/.dylib files; allow library loading across signing identities. -->
     <key>com.apple.security.cs.disable-library-validation</key>
