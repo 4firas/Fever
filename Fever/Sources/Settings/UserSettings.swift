@@ -137,14 +137,6 @@ public final class TrackingConfig {
         }
     }
 
-    /// OSC route in PC mode. false (default) = Direct: the PC daemon sends OSC straight to
-    /// `pcOscHost:pcOscPort` (the Quest). true = Relay via Mac: the daemon sends to this
-    /// Mac's LAN IP and a Mac-side relay forwards every packet on to the Quest — for when
-    /// the wired PC can't reach the Quest's Wi-Fi subnet but the Mac can.
-    public var pcOscRelayViaMac: Bool {
-        didSet { UserDefaults.standard.set(pcOscRelayViaMac, forKey: Keys.pcOscRelayViaMac) }
-    }
-
     /// 8-point trackers (elbows ON) — the PinoFBT 2.0 desktop default. ON for PC mode
     /// (the GPU runs the full byte-exact arm solver, so elbows are first-class here).
     public var pcSendElbows: Bool {
@@ -182,76 +174,34 @@ public final class TrackingConfig {
         didSet { UserDefaults.standard.set(pcShowSkeleton, forKey: Keys.pcShowSkeleton) }
     }
 
-    // MARK: - Inference on PC — pose model (NLF vs GVHMR)
-
-    /// Which pose model the PC daemon runs in PC mode. "nlf" (default) = the byte-exact
-    /// PinoFBT 2.0 NLF model + IK (per-frame, camera-frame). "gvhmr" = the world-grounded,
-    /// gravity-aligned GVHMR model. Only affects PC mode; the OSC route + target are reused
-    /// unchanged for both. Stored as a string ("nlf" | "gvhmr") so it round-trips trivially.
-    public var pcModel: String {
-        didSet { UserDefaults.standard.set(pcModel, forKey: Keys.pcModel) }
-    }
-
-    /// GVHMR readout lookahead (frames). Trades latency against smoothness: higher reads
-    /// further ahead (smoother, more latency), lower is snappier. DEFAULT 5; range 0–15.
-    /// GVHMR-only; needs live VRChat tuning.
-    public var gvhmrK: Int {
-        didSet {
-            let c = min(max(gvhmrK, 0), 15)
-            if c != gvhmrK { gvhmrK = c; return }
-            UserDefaults.standard.set(gvhmrK, forKey: Keys.gvhmrK)
-        }
-    }
-
-    /// GVHMR facing tune — pass `--mirror` to the GVHMR daemon when ON. GVHMR-only; needs
-    /// live VRChat tuning (the world-grounded frame's handedness can't be known beforehand).
-    public var gvhmrMirror: Bool {
-        didSet { UserDefaults.standard.set(gvhmrMirror, forKey: Keys.gvhmrMirror) }
-    }
-
-    /// GVHMR facing tune — pass `--flip-x` to the GVHMR daemon when ON. GVHMR-only; needs
-    /// live VRChat tuning, paired with `gvhmrMirror` to dial in the avatar's facing.
-    public var gvhmrFlipX: Bool {
-        didSet { UserDefaults.standard.set(gvhmrFlipX, forKey: Keys.gvhmrFlipX) }
-    }
-
-    /// GVHMR camera mode. false (default) = Static: the fast real-time path (fixed camera).
-    /// true = Moving: run GVHMR world-grounded with camera motion ("as it was meant
-    /// originally") — heavier/experimental. GVHMR-only; passes `--moving` when true.
-    public var gvhmrMoving: Bool {
-        didSet { UserDefaults.standard.set(gvhmrMoving, forKey: Keys.gvhmrMoving) }
-    }
-
-    /// GVHMR foot-contact damping — pass `--foot-contact` when ON. Uses GVHMR's own
-    /// foot-contact prediction to damp planted feet (less foot-slide). DEFAULT off;
-    /// GVHMR-only; tune live against VRChat.
-    public var gvhmrFootContact: Bool {
-        didSet { UserDefaults.standard.set(gvhmrFootContact, forKey: Keys.gvhmrFootContact) }
-    }
-
-    /// GVHMR native rotations — pass `--native-rot` when ON. Uses GVHMR's own joint
-    /// rotations instead of re-deriving them from positions (richer twist/roll).
-    /// DEFAULT off; GVHMR-only; experimental, needs live facing/convention tuning.
-    public var gvhmrNativeRot: Bool {
-        didSet { UserDefaults.standard.set(gvhmrNativeRot, forKey: Keys.gvhmrNativeRot) }
-    }
-
     // MARK: - Init (loads persisted values; falls back to defaults)
 
     public init() {
         let d = UserDefaults.standard
-        // One-shot migration: move EXISTING installs off the old higher-latency defaults
-        // (gvhmrK 5 → 2; stream 1280×720 → 960×540) exactly once, then persist. Gated by a
+        // One-shot migration: move EXISTING installs off the old higher-latency default
+        // (stream 1280×720 → 960×540) exactly once, then persist. Gated by a
         // flag so a later DELIBERATE change to those values is respected (not re-overridden
         // every launch). Fresh installs never had these keys, so they just take the new
         // defaults below — this block is a no-op for them.
         if !d.bool(forKey: Keys.didMigrateLatencyDefaults) {
-            if d.object(forKey: Keys.gvhmrK) as? Int == 5 { d.set(2, forKey: Keys.gvhmrK) }
             if d.object(forKey: Keys.pcStreamWidth) as? Int == 1280,
                d.object(forKey: Keys.pcStreamHeight) as? Int == 720 {
                 d.set(960, forKey: Keys.pcStreamWidth); d.set(540, forKey: Keys.pcStreamHeight)
             }
             d.set(true, forKey: Keys.didMigrateLatencyDefaults)
+        }
+        // Second one-shot migration: move installs off the 960×540 stream (the previous
+        // "lower latency" default) BACK onto 1280×720. MEASURED: 720p gives the model a
+        // higher-res person crop → less raw-joint jitter (jerk ~0.0089 vs ~0.0105 at 540),
+        // and LAN transport is resolution-independent (~17ms either way) — so 540 cost
+        // smoothness for no latency win. Only moves the exact auto-migrated 960×540 value;
+        // a deliberate 540 (or 1080) choice after this ships is respected via the flag.
+        if !d.bool(forKey: Keys.didMigrateStreamRes720) {
+            if d.object(forKey: Keys.pcStreamWidth) as? Int == 960,
+               d.object(forKey: Keys.pcStreamHeight) as? Int == 540 {
+                d.set(1280, forKey: Keys.pcStreamWidth); d.set(720, forKey: Keys.pcStreamHeight)
+            }
+            d.set(true, forKey: Keys.didMigrateStreamRes720)
         }
         oscHost = d.string(forKey: Keys.oscHost) ?? "127.0.0.1"
         oscPort = d.object(forKey: Keys.oscPort) as? Int ?? 9000
@@ -272,34 +222,21 @@ public final class TrackingConfig {
         // PC mode = the 1:1 PinoFBT 2.0 config by default (8-point, mirrored, PCVR target).
         pcOscHost = d.string(forKey: Keys.pcOscHost) ?? "127.0.0.1"
         pcOscPort = d.object(forKey: Keys.pcOscPort) as? Int ?? 9000
-        pcOscRelayViaMac = d.object(forKey: Keys.pcOscRelayViaMac) as? Bool ?? false
         pcSendElbows = d.object(forKey: Keys.pcSendElbows) as? Bool ?? true
-        // 960×540 default: the model crops to a ~256px person box, so 540p is already
-        // supersampled for it, while 720p just spends more MJPEG encode + UDP packets
-        // (reassembly jitter) + PC decode for pixels the model throws away. The Mac
-        // preview is the LOCAL full-res camera, not this stream, so this is invisible
-        // on-screen and only cuts transport latency. (Existing 1280×720 installs are moved
-        // here by the one-shot migration above.)
-        pcStreamWidth = d.object(forKey: Keys.pcStreamWidth) as? Int ?? 960
-        pcStreamHeight = d.object(forKey: Keys.pcStreamHeight) as? Int ?? 540
+        // 1280×720 default. The earlier 960×540 "already supersampled for the model's ~256px
+        // crop" assumption was DISPROVEN by measurement: the model's raw joints are measurably
+        // jitterier at 540 (jerk ~0.0105 vs ~0.0089 at 720 on the same clip) — the person box at
+        // 540 has fewer real pixels, so the detected joints are noisier, and OneEuro can't remove
+        // it. LAN transport is resolution-independent (~17ms at either size), so 540 traded
+        // smoothness for no latency gain. (Old 960×540 installs are moved to 720 by the second
+        // one-shot migration above; a deliberate re-pick after that is respected.)
+        pcStreamWidth = d.object(forKey: Keys.pcStreamWidth) as? Int ?? 1280
+        pcStreamHeight = d.object(forKey: Keys.pcStreamHeight) as? Int ?? 720
         pcStreamFPS = d.object(forKey: Keys.pcStreamFPS) as? Int ?? 60
         pcBitrateMbps = d.object(forKey: Keys.pcBitrateMbps) as? Int ?? 10
         pcPoliteMode = d.object(forKey: Keys.pcPoliteMode) as? Bool ?? false
         pcFpsCap = d.object(forKey: Keys.pcFpsCap) as? Int ?? 0
         pcShowSkeleton = d.object(forKey: Keys.pcShowSkeleton) as? Bool ?? true
-        pcModel = d.string(forKey: Keys.pcModel) ?? "nlf"
-        // GVHMR reads out the pose k frames in the PAST (the denoiser's bidirectional
-        // window uses k FUTURE frames to stabilize that frame). k is therefore pure
-        // latency: ~k/fps seconds (k=5 @ 30fps ≈ 167ms, @ 25fps ≈ 200ms). The window's
-        // 119 PAST frames already denoise the readout even at k=0, and output-side OneEuro
-        // + the predictive upsampler absorb residual jitter — so a low k is a big latency
-        // win for marginal quality. Default 2 (old k=5 installs moved by the migration above).
-        gvhmrK = min(15, max(0, d.object(forKey: Keys.gvhmrK) as? Int ?? 2))
-        gvhmrMirror = d.object(forKey: Keys.gvhmrMirror) as? Bool ?? false
-        gvhmrFlipX = d.object(forKey: Keys.gvhmrFlipX) as? Bool ?? false
-        gvhmrMoving = d.object(forKey: Keys.gvhmrMoving) as? Bool ?? false
-        gvhmrFootContact = d.object(forKey: Keys.gvhmrFootContact) as? Bool ?? false
-        gvhmrNativeRot = d.object(forKey: Keys.gvhmrNativeRot) as? Bool ?? false
     }
 
     // MARK: - Persistence keys
@@ -320,9 +257,9 @@ public final class TrackingConfig {
         static let pcMAC = "pcMAC"
         static let pcOscHost = "pcOscHost"
         static let pcOscPort = "pcOscPort"
-        static let pcOscRelayViaMac = "pcOscRelayViaMac"
         static let pcSendElbows = "pcSendElbows"
         static let didMigrateLatencyDefaults = "didMigrateLatencyDefaults"
+        static let didMigrateStreamRes720 = "didMigrateStreamRes720"
         static let pcStreamWidth = "pcStreamWidth"
         static let pcStreamHeight = "pcStreamHeight"
         static let pcStreamFPS = "pcStreamFPS"
@@ -330,12 +267,5 @@ public final class TrackingConfig {
         static let pcPoliteMode = "pcPoliteMode"
         static let pcFpsCap = "pcFpsCap"
         static let pcShowSkeleton = "pcShowSkeleton"
-        static let pcModel = "pcModel"
-        static let gvhmrK = "gvhmrK"
-        static let gvhmrMirror = "gvhmrMirror"
-        static let gvhmrFlipX = "gvhmrFlipX"
-        static let gvhmrMoving = "gvhmrMoving"
-        static let gvhmrFootContact = "gvhmrFootContact"
-        static let gvhmrNativeRot = "gvhmrNativeRot"
     }
 }

@@ -67,7 +67,6 @@ struct FeverCheck {
         PredictiveUpsamplerTests.run(t)
         WireParityTests.run(t)
         ConfigPersistenceTests.run(t)
-        PCOscRouteTests.run(t)
         PCModelLaunchTests.run(t)
 
         let summary = t.finalSummary()

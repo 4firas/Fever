@@ -326,61 +326,6 @@ struct PCSettings: View {
                     .foregroundStyle(Theme.textSecondary)
             }
 
-            // -- Model: which pose model the PC daemon runs --
-            Section("Model") {
-                Picker("Pose model", selection: $config.pcModel) {
-                    Text("NLF (byte-exact PinoFBT)").tag("nlf")
-                    Text("GVHMR (world-grounded)").tag("gvhmr")
-                }
-                .disabled(running)
-                Text("NLF is the byte-exact PinoFBT 2.0 model + IK (per-frame, camera-frame) — the default. GVHMR is world-grounded / gravity-aligned (steadier verticals + planted feet). Switching takes effect at the next Start; the OSC route + target are shared by both.")
-                    .font(.caption)
-                    .foregroundStyle(Theme.textSecondary)
-
-                // GVHMR-only controls (hidden for NLF). Camera mode, readout lookahead,
-                // and the facing tune — all need live VRChat tuning by the user.
-                if config.pcModel == "gvhmr" {
-                    Picker("Camera", selection: $config.gvhmrMoving) {
-                        Text("Static (default)").tag(false)
-                        Text("Moving").tag(true)
-                    }
-                    .disabled(running)
-                    Text("Static is the fast real-time path (fixed camera) — leave it here. Moving runs GVHMR world-grounded with camera motion, the way it was meant originally — heavier and experimental.")
-                        .font(.caption)
-                        .foregroundStyle(Theme.textSecondary)
-
-                    HStack {
-                        Text("Lookahead (k)")
-                        Spacer()
-                        Text("\(config.gvhmrK)")
-                            .monospacedDigit()
-                            .foregroundStyle(Theme.textSecondary)
-                    }
-                    Slider(value: Binding(get: { Double(config.gvhmrK) },
-                                          set: { config.gvhmrK = Int($0.rounded()) }),
-                           in: 0...15, step: 1)
-                    Text("Readout lookahead, in frames. Higher reads further ahead (smoother, more latency); lower is snappier. Default 5 — tune live against VRChat.")
-                        .font(.caption)
-                        .foregroundStyle(Theme.textSecondary)
-
-                    Toggle("Mirror (facing)", isOn: $config.gvhmrMirror)
-                    Toggle("Flip X (facing)", isOn: $config.gvhmrFlipX)
-                    Text("Facing tune: if your avatar faces the wrong way or its handedness looks reversed in VRChat, toggle these (one or both) until it's correct. They only affect GVHMR.")
-                        .font(.caption)
-                        .foregroundStyle(Theme.textSecondary)
-
-                    Toggle("Foot contact (planted feet)", isOn: $config.gvhmrFootContact)
-                    Text("Uses GVHMR's foot-contact prediction to damp planted feet (less foot-slide). Tune live against VRChat.")
-                        .font(.caption)
-                        .foregroundStyle(Theme.textSecondary)
-
-                    Toggle("Native rotations (experimental)", isOn: $config.gvhmrNativeRot)
-                    Text("Uses GVHMR's own joint rotations instead of re-deriving them from positions (richer twist/roll). Experimental — needs live facing/convention tuning in VRChat; expect to combine with the Mirror/Flip-X toggles.")
-                        .font(.caption)
-                        .foregroundStyle(Theme.textSecondary)
-                }
-            }
-
             // -- Connection --
             Section("PC Connection") {
                 TextField("PC address", text: Binding(
@@ -405,14 +350,7 @@ struct PCSettings: View {
                 TextField("OSC port", text: Binding(
                     get: { String(config.pcOscPort) },
                     set: { if let p = Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) { config.pcOscPort = p } }))
-                Picker("OSC route", selection: $config.pcOscRelayViaMac) {
-                    Text("Direct (PC → Quest)").tag(false)
-                    Text("Relay via Mac (PC → Mac → Quest)").tag(true)
-                }
                 Text("Where the PC sends the trackers. For standalone Quest, enter the headset's Wi-Fi IP (Quest ▸ Settings ▸ Wi-Fi ▸ your network ▸ Advanced — reserve it in your router so it doesn't change). 127.0.0.1 only if VRChat runs on the PC via Quest Link.")
-                    .font(.caption)
-                    .foregroundStyle(Theme.textSecondary)
-                Text("Route: Direct sends OSC straight from the PC to the Quest. Relay via Mac sends it to this Mac first, which forwards it to the Quest — use this when the PC is on wired ethernet and can't reach the Quest's Wi-Fi network but the Mac can.")
                     .font(.caption)
                     .foregroundStyle(Theme.textSecondary)
                 if oscTargetsLoopback {
@@ -435,11 +373,8 @@ struct PCSettings: View {
                 }
                 // NLF uses the SAME handedness setting as on-device (mirrorTracking) so PC
                 // and on-device track 1:1 — this is the same control as the General tab's
-                // "Swap tracker handedness", surfaced here for convenience. GVHMR has its OWN
-                // facing controls in the Model section, so hide this one for GVHMR.
-                if config.pcModel == "nlf" {
-                    Toggle("Swap tracker handedness (L/R)", isOn: $config.mirrorTracking)
-                }
+                // "Swap tracker handedness", surfaced here for convenience.
+                Toggle("Swap tracker handedness (L/R)", isOn: $config.mirrorTracking)
                 Picker("Resolution", selection: Binding(
                     get: { "\(config.pcStreamWidth)x\(config.pcStreamHeight)" },
                     set: { sel in

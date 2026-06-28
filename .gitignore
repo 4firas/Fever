@@ -52,3 +52,4 @@ pc-daemon/
 
 # On-device NLF runtime (venv + non-distributable model)
 nlf-runtime/
+LOOP_LOG.md

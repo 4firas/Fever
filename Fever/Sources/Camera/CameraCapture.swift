@@ -135,6 +135,17 @@ public final class CameraCapture: NSObject, FrameSource {
         set { lock.withLock { _onFrame = newValue } }
     }
 
+    /// PC REMOTE-inference mode: keep filling the latest-frame mailbox even while `onFrame`
+    /// (the PC H.264 encoder) is set, so the local `TrackingPipeline` worker can ALSO pull
+    /// frames. In remote mode the camera both streams to the PC (onFrame) and drives the Mac
+    /// pipeline that does the smoothing/IK/OSC (mailbox). Default false → unchanged for
+    /// on-device (no onFrame). At most one buffer pinned.
+    public var fanOutMailbox: Bool {
+        get { lock.withLock { _fanOutMailbox } }
+        set { lock.withLock { _fanOutMailbox = newValue } }
+    }
+    private var _fanOutMailbox = false
+
     /// Observed when the resolved authorization state changes (e.g. after the
     /// system permission prompt is answered). Invoked on an arbitrary queue;
     /// the pipeline hops to the main actor before publishing.
@@ -499,7 +510,7 @@ extension CameraCapture: AVCaptureVideoDataOutputSampleBufferDelegate {
             // When a live sink is set (PC-offload siphons frames straight to the
             // encoder), the pull mailbox is never drained — so don't pin a second pool
             // buffer in it; that only raises late-drop pressure for no consumer.
-            if _onFrame == nil {
+            if _onFrame == nil || _fanOutMailbox {
                 pendingBuffer = pixelBuffer
                 pendingTime = time
             }

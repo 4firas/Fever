@@ -121,11 +121,15 @@ final class PCCameraStreamer: @unchecked Sendable {
             // ~3 frames (GOP/reorder/decode) = ~100ms of unavoidable latency. MJPEG encodes
             // each frame independently — no pipeline. Measured Mac→PC transport: VideoToolbox
             // ~324ms → x264 ~150ms → MJPEG ~99ms p50 / 49ms min (the floor is now the 30fps
-            // frame period itself). q:v 5 is high quality; the model only needs a 256px crop.
+            // frame period itself). q:v 2 (was 5): MEASURED — the model's RAW joints are noticeably
+            // jitterier on a more-compressed frame (jerk ~0.0089 at q5 vs ~0.0079 at q2 on the same
+            // clip), because MJPEG's per-frame DCT-block shimmer moves the detected joints; OneEuro
+            // can't remove it (its adaptive cutoff backs off on the apparent motion). q2 is ~+80%
+            // bitrate (still ~30 Mbps at 720p) — trivial on the LAN, and the smoothness win is real.
             // Tradeoff: MJPEG is more sensitive to UDP packet loss (a frame = many packets, any
             // loss drops that frame) — fine on a clean 5GHz/wired LAN; the daemon discards
             // corrupt frames and the 120Hz upsampler smooths the gaps.
-            "-c:v", "mjpeg", "-q:v", "5", "-pix_fmt", "yuvj420p",
+            "-c:v", "mjpeg", "-q:v", "2", "-pix_fmt", "yuvj420p",
             // Push each packet out immediately instead of letting the mpegts muxer
             // accumulate — shaves buffering latency off the Mac→PC hop.
             "-flush_packets", "1", "-muxdelay", "0", "-muxpreload", "0",

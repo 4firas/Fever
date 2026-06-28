@@ -320,7 +320,7 @@ private struct ControlBar: View {
 
     private func toggleTracking() {
         if config.inferenceOnPC {
-            if controller.isActive { controller.stop() } else { controller.start(makePCConfig(), camera: camera) }
+            if controller.isActive { controller.stop() } else { controller.start(makePCConfig(), camera: camera, config: config) }
         } else {
             if pipeline.isRunning { pipeline.stop() } else { pipeline.start() }
         }
@@ -337,23 +337,17 @@ private struct ControlBar: View {
         let streamFPS = min(config.pcStreamFPS, config.cameraMaxFPS)
         return PCOffloadConfig.make(
             host: config.pcHost, user: config.pcUser, mac: config.pcMAC,
-            model: config.pcModel == "gvhmr" ? .gvhmr : .nlf,
             oscIP: config.pcOscHost, oscPort: config.pcOscPort,
-            relayViaMac: config.pcOscRelayViaMac, relayPort: 9001,
             heightCm: Int((config.userHeightMeters * 100).rounded()),
             // ONE handedness setting for both modes: PC NLF applies the SAME proper L/R
             // skeleton mirror as on-device, so they track 1:1 (was a separate pcFlipCamera).
             sendElbows: config.pcSendElbows, mirror: config.mirrorTracking,
             predictionLeadMs: config.predictionLeadMs,
-            gvhmrK: config.gvhmrK, gvhmrMirror: config.gvhmrMirror,
-            gvhmrFlipX: config.gvhmrFlipX, gvhmrMoving: config.gvhmrMoving,
-            gvhmrFootContact: config.gvhmrFootContact, gvhmrNativeRot: config.gvhmrNativeRot,
             streamW: config.pcStreamWidth, streamH: config.pcStreamHeight,
             streamFPS: streamFPS, bitrateMbps: config.pcBitrateMbps,
             politeMode: config.pcPoliteMode, fpsCap: config.pcFpsCap,
             // Pinned: the daemon listens on 5000 and only 5000 is opened in the PC
             // firewall, so the stream target must stay 5000 (no user-facing port knob).
-            // The OSC relay port (9001) is local to the Mac, only used in Relay route.
             streamPort: 5000, cameraName: camName)
     }
 }

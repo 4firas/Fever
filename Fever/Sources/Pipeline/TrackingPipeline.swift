@@ -83,11 +83,22 @@ public final class TrackingPipeline {
     private static let idlePollInterval: TimeInterval = 0.004
     private var lastTelemetryPublish: TimeInterval = 0
 
-    public init(config: TrackingConfig, source: FrameSource, landmarker: any NLFPoseSource) {
+    /// `oscHostOverride`/`oscPortOverride`: when set, OSC is sent here instead of
+    /// `config.oscHost`/`config.oscPort`. Used by PC REMOTE-inference mode, which reuses this
+    /// whole pipeline (fed by a `RemoteNLFSource`) but must target the PC-mode OSC endpoint
+    /// (the Quest) while still reading the SHARED config for the tracking params. nil on-device.
+    private let oscHostOverride: String?
+    private let oscPortOverride: Int?
+
+    public init(config: TrackingConfig, source: FrameSource, landmarker: any NLFPoseSource,
+                oscHostOverride: String? = nil, oscPortOverride: Int? = nil,
+                sendElbowsOverride: Bool? = nil) {
         self.config = config
         self.source = source
         self.landmarker = landmarker
-        self.processor = FrameProcessor(config: config)
+        self.oscHostOverride = oscHostOverride
+        self.oscPortOverride = oscPortOverride
+        self.processor = FrameProcessor(config: config, sendElbowsOverride: sendElbowsOverride)
         self.camera = source as? CameraCapture
         if let camera {
             self.previewSession = camera.session
@@ -110,7 +121,8 @@ public final class TrackingPipeline {
         processor.rebuild(from: config)
         landmarker.reset()
 
-        let sender = OSCSender(host: config.oscHost, port: config.oscPort)
+        let sender = OSCSender(host: oscHostOverride ?? config.oscHost,
+                               port: oscPortOverride ?? config.oscPort)
         var seedSlots = TrackerMapPino.slots
             .filter { config.sendElbows || ($0.index != 3 && $0.index != 4) }   // 6-point default
             .map(\.path)
@@ -452,6 +464,9 @@ private final class FrameProcessor: @unchecked Sendable {
     private var smoother: TwoEuroJointSmoother
     private let solver: PinoSolver
     private let cfg: TrackingConfig   // live source for fpsMultiplier (shared object)
+    /// PC remote-inference mode reuses this whole pipeline but its 6-/8-point choice is the
+    /// SEPARATE `pcSendElbows` setting, not the on-device `cfg.sendElbows`. When set, it wins.
+    private let sendElbowsOverride: Bool?
     /// Reflect the model skeleton (swap L/R labels + negate x) to convert the Mac
     /// webcam's native handedness to PinoFBT's capture handedness. A PROPER
     /// reflection of the input geometry — the IK re-derives correct-chirality
@@ -465,9 +480,10 @@ private final class FrameProcessor: @unchecked Sendable {
     private var windowStart: TimeInterval = 0
     private var measuredFPS: Double = 0
 
-    init(config: TrackingConfig) {
+    init(config: TrackingConfig, sendElbowsOverride: Bool? = nil) {
         // 1:1 PinoFBT chain: OneEuro over raw (24,3) → preprocess → IK → bundle.
         cfg = config
+        self.sendElbowsOverride = sendElbowsOverride
         smoother = TwoEuroJointSmoother()
         solver = PinoSolver(heightCm: Float(config.userHeightMeters * 100))
         mirrorEnabled = config.mirrorTracking
@@ -547,7 +563,7 @@ private final class FrameProcessor: @unchecked Sendable {
         // that discontinuity.
         let mirror = cfg.mirrorTracking
         if mirror != mirrorEnabled { smoother.reset(); mirrorEnabled = mirror }
-        let elbows = cfg.sendElbows
+        let elbows = sendElbowsOverride ?? cfg.sendElbows
         let heightCm = Float(cfg.userHeightMeters * 100)
         solver.setHeightCm(heightCm)
 
