@@ -186,8 +186,14 @@ public final class TrackingPipeline {
                 }
                 lastCaptureTime = time
 
-                // Person box first (the app runs its detection before the pose model).
+                // Person box FIRST, and published the moment it exists — the app runs
+                // its detector on its own queue and the rectangle never waits for the
+                // pose model. Publishing it after the pose (as this did) put the pose's
+                // latency on the box, which reads as the box lagging behind the body.
                 let detected = detector?.detect(pixelBuffer)
+                if let detected {
+                    Task { @MainActor in self?.publishBox(detected) }
+                }
                 guard let pose = await landmarker.detect(pixelBuffer, at: time) else { continue }
                 if Task.isCancelled { break }   // a Stop landed during detect → don't touch the (possibly restarted) shared state
 
@@ -345,10 +351,19 @@ public final class TrackingPipeline {
         }
     }
 
+    /// Rectangle only: published as soon as the detector returns, so the box keeps up
+    /// with the body instead of inheriting the pose model's latency. Not cleared when a
+    /// frame finds nobody — the last box stays until a new one replaces it (the app's
+    /// `_safeLastBox`), so it can't flicker off on a single bad frame.
+    private func publishBox(_ box: PersonBox) {
+        guard isRunning else { return }
+        previewBox = box
+    }
+
     private func publishPreview(_ points: [SIMD2<Float>], box: PersonBox?) {
         guard isRunning else { return }
         previewPoints = points
-        previewBox = box
+        if let box { previewBox = box }
     }
 
     private func publishTelemetry(_ t: Telemetry, trackers: [LiveTracker]) {
