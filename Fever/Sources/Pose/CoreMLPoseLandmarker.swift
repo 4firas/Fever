@@ -25,10 +25,12 @@ public final class CoreMLPoseLandmarker: NLFPoseSource, @unchecked Sendable {
     private static let jointCount = SMPLJoint.count   // 24
 
     private let model: MLModel
-    /// Guards `scratch`. `MLModel.prediction` is itself thread-safe; the pipeline
-    /// drives this from a single inference worker, the lock just makes that explicit.
+    /// Guards `input`. `MLModel.prediction` is itself thread-safe; the pipeline drives
+    /// this from a single inference worker, the lock just makes that explicit.
     private let lock = NSLock()
-    private var scratch: CVPixelBuffer?
+    private let input = ImageInputBuffer(side: CoreMLPoseLandmarker.inputSide)
+    /// When set, the graph is fed a crop of the detected person instead of the whole frame.
+    public var cropBox: PersonBox?
 
     public init(modelURL: URL) throws {
         let cfg = MLModelConfiguration()
@@ -54,49 +56,15 @@ public final class CoreMLPoseLandmarker: NLFPoseSource, @unchecked Sendable {
     private func infer(_ pixelBuffer: CVPixelBuffer, at time: TimeInterval) -> SMPLPose? {
         lock.lock()
         defer { lock.unlock() }
-        guard let input = scaledInput(from: pixelBuffer) else { return nil }
+        let prepared = cropBox.map { input.fill(from: pixelBuffer, box: $0, margin: 0.08) }
+                               ?? input.fill(from: pixelBuffer)
+        guard let prepared else { return nil }
         guard let provider = try? MLDictionaryFeatureProvider(
-            dictionary: ["image": MLFeatureValue(pixelBuffer: input)]) else { return nil }
+            dictionary: ["image": MLFeatureValue(pixelBuffer: prepared)]) else { return nil }
         guard let out = try? model.prediction(from: provider) else { return nil }
         guard let j3 = out.featureValue(for: "joints3D")?.multiArrayValue,
               let j2 = out.featureValue(for: "joints2D")?.multiArrayValue else { return nil }
         return Self.pose(from: j3, j2, timestamp: time)
-    }
-
-    /// Frame → the model's 384×384 BGRA input. Plain scale (the graph was trained on
-    /// frames handed to CoreML at its constraint size, which stretches to fill).
-    private func scaledInput(from src: CVPixelBuffer) -> CVPixelBuffer? {
-        let side = Self.inputSide
-        if scratch == nil {
-            var pb: CVPixelBuffer?
-            let attrs: [CFString: Any] = [
-                kCVPixelBufferCGImageCompatibilityKey: false,
-                kCVPixelBufferCGBitmapContextCompatibilityKey: false,
-                kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
-            ]
-            CVPixelBufferCreate(kCFAllocatorDefault, side, side, kCVPixelFormatType_32BGRA,
-                                attrs as CFDictionary, &pb)
-            scratch = pb
-        }
-        guard let dst = scratch else { return nil }
-        guard CVPixelBufferGetPixelFormatType(src) == kCVPixelFormatType_32BGRA else { return nil }
-
-        CVPixelBufferLockBaseAddress(src, .readOnly)
-        CVPixelBufferLockBaseAddress(dst, [])
-        defer {
-            CVPixelBufferUnlockBaseAddress(dst, [])
-            CVPixelBufferUnlockBaseAddress(src, .readOnly)
-        }
-        guard let sb = CVPixelBufferGetBaseAddress(src), let db = CVPixelBufferGetBaseAddress(dst) else { return nil }
-        var s = vImage_Buffer(data: sb, height: vImagePixelCount(CVPixelBufferGetHeight(src)),
-                              width: vImagePixelCount(CVPixelBufferGetWidth(src)),
-                              rowBytes: CVPixelBufferGetBytesPerRow(src))
-        var d = vImage_Buffer(data: db, height: vImagePixelCount(side), width: vImagePixelCount(side),
-                              rowBytes: CVPixelBufferGetBytesPerRow(dst))
-        // BGRA is 4-channel 8-bit; the scale is channel-agnostic.
-        guard vImageScale_ARGB8888(&s, &d, nil, vImage_Flags(kvImageHighQualityResampling)) == kvImageNoError
-        else { return nil }
-        return dst
     }
 
     // MARK: - output decoding
@@ -147,19 +115,29 @@ public final class CoreMLPoseLandmarker: NLFPoseSource, @unchecked Sendable {
     }
 }
 
-/// Where the compiled pose model lives.
+/// Where the compiled models live.
 public struct CoreMLModelPaths: Sendable {
     public let model: URL
 
-    public static func resolve(env: [String: String] = ProcessInfo.processInfo.environment) -> CoreMLModelPaths? {
+    /// Which of the app's two compiled models to resolve.
+    public enum Kind: String, Sendable {
+        case pose
+        case detection
+    }
+
+    public static func resolve(kind: Kind = .pose,
+                               env: [String: String] = ProcessInfo.processInfo.environment) -> CoreMLModelPaths? {
+        let file = "\(kind.rawValue).mlmodelc"
         var candidates: [String] = []
-        if let p = env["FEVER_COREML_MODEL"] { candidates.append((p as NSString).expandingTildeInPath) }
-        if let res = Bundle.main.resourceURL {
-            candidates.append(res.appendingPathComponent("models/pose.mlmodelc").path)
+        if let p = env[kind == .pose ? "FEVER_COREML_MODEL" : "FEVER_COREML_DETECTION_MODEL"] {
+            candidates.append((p as NSString).expandingTildeInPath)
         }
-        candidates.append("~/Library/Application Support/Fever/models/pose.mlmodelc")
-        candidates.append("~/Dev/Fever/models/pose.mlmodelc")
-        candidates.append("~/pino_rig/model/pose.mlmodelc")
+        if let res = Bundle.main.resourceURL {
+            candidates.append(res.appendingPathComponent("models/\(file)").path)
+        }
+        candidates.append("~/Library/Application Support/Fever/models/\(file)")
+        candidates.append("~/Dev/Fever/models/\(file)")
+        candidates.append("~/pino_rig/model/\(file)")
         for c in candidates {
             var isDir: ObjCBool = false
             let path = (c as NSString).expandingTildeInPath

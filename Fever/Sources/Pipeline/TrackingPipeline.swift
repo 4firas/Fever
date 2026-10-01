@@ -42,6 +42,8 @@ public final class TrackingPipeline {
     // MARK: - Published telemetry (main-actor)
     public private(set) var isRunning = false
     public private(set) var fps: Double = 0
+    /// What the camera itself delivers (see RuntimeBox.cameraFPS).
+    public private(set) var cameraFPS: Double = 0
     public private(set) var outputFPS: Double = 0     // fps-mux OSC send rate (Hz)
     public private(set) var fpsMultiplier: Int = 7    // current fps-mux multiplier (1–10×)
     /// The latest solved body trackers (slot-keyed), published at the throttled
@@ -51,6 +53,9 @@ public final class TrackingPipeline {
     /// Screen-normalized 24-joint overlay for the current inference frame. Published
     /// every inference frame; the camera picture behind it is the live capture layer.
     public private(set) var previewPoints: [SIMD2<Float>] = []
+    /// Detected person rectangle for the same frame (normalized, top-left origin),
+    /// or the last box that cleared the confidence gate. nil when nothing is found.
+    public private(set) var previewBox: PersonBox?
     public private(set) var droppedFrames = 0
     public private(set) var previewSession: AVCaptureSession?
     public private(set) var cameraAuthorized = false
@@ -66,6 +71,10 @@ public final class TrackingPipeline {
     private let config: TrackingConfig
     private let source: FrameSource
     private let landmarker: any NLFPoseSource
+    /// The app's `detectionModel`: person box for the preview rectangle and for
+    /// keeping a stale-but-sane box across frames where detection dips.
+    /// nil in PC-offload mode — the PC owns inference there.
+    private let detector: DetectionLandmarker?
     private let camera: CameraCapture?
     private var osc: OSCSender?
     private let processor: FrameProcessor
@@ -95,6 +104,7 @@ public final class TrackingPipeline {
         self.config = config
         self.source = source
         self.landmarker = landmarker
+        self.detector = config.inferenceOnPC ? nil : DetectionLandmarker()
         self.oscHostOverride = oscHostOverride
         self.oscPortOverride = oscPortOverride
         self.processor = FrameProcessor(config: config, sendElbowsOverride: sendElbowsOverride)
@@ -147,6 +157,11 @@ public final class TrackingPipeline {
 
         let pull = makeFramePuller()
         let landmarker = NLFLandmarkerBox(self.landmarker)
+        let detector = self.detector          // @unchecked Sendable; owns its own lock
+        // The detector is cheap enough to run on every frame (measured: 2.3 ms mean on
+        // the ANE, ~5% of a 30 fps budget), so the box tracks the body at camera rate.
+        var lastCaptureTime: TimeInterval = 0
+        var captureInterval: Double = 0          // EMA of camera frame spacing
         let processor = self.processor
         let runtime = self.runtime
         let dropCounter = DropCounter(source: source)
@@ -163,10 +178,20 @@ public final class TrackingPipeline {
                     try? await Task.sleep(nanoseconds: UInt64(Self.idlePollInterval * 1_000_000_000))
                     continue
                 }
+                // Camera rate: the spacing between the frames the camera hands us.
+                if lastCaptureTime > 0, time > lastCaptureTime {
+                    let dt = time - lastCaptureTime
+                    captureInterval = captureInterval == 0 ? dt : captureInterval * 0.9 + dt * 0.1
+                    if captureInterval > 0 { runtime.setCameraFPS(1 / captureInterval) }
+                }
+                lastCaptureTime = time
+
+                // Person box first (the app runs its detection before the pose model).
+                let detected = detector?.detect(pixelBuffer)
                 guard let pose = await landmarker.detect(pixelBuffer, at: time) else { continue }
                 if Task.isCancelled { break }   // a Stop landed during detect → don't touch the (possibly restarted) shared state
 
-                let frame = processor.process(pose, droppedFrames: dropCounter.current)
+                let frame = processor.process(pose, droppedFrames: dropCounter.current, box: detected)
                 // Hand the smoothed joints + velocity to the predictive upsampler
                 // (the high-rate output loop below extrapolates + solves + sends).
                 // Stamp it with the monotonic store time so the loop knows how stale
@@ -194,9 +219,11 @@ public final class TrackingPipeline {
                 // IMMUTABLE payload (let) so the fire-and-forget Task captures a fixed
                 // value — never a `var` the loop could reassign before the Task runs.
                 let points = frame.preview
+                let box = frame.box
                 Task { @MainActor in
                     guard let self else { return }
-                    self.publishPreview(points)
+                    self.cameraFPS = runtime.cameraFPS()
+                    self.publishPreview(points, box: box)
                     self.publishTelemetry(telemetry, trackers: liveTrackers)
                 }
             }
@@ -288,7 +315,7 @@ public final class TrackingPipeline {
         if let sender = osc { Task { await sender.stop() } }
         osc = nil
         processor.reset()
-        fps = 0; previewPoints = []; liveTrackers = []; healthNote = nil
+        fps = 0; cameraFPS = 0; previewPoints = []; previewBox = nil; liveTrackers = []; healthNote = nil
     }
 
     /// If the pipeline is dropped without an explicit stop(), still cancel its two
@@ -318,9 +345,10 @@ public final class TrackingPipeline {
         }
     }
 
-    private func publishPreview(_ points: [SIMD2<Float>]) {
+    private func publishPreview(_ points: [SIMD2<Float>], box: PersonBox?) {
         guard isRunning else { return }
         previewPoints = points
+        previewBox = box
     }
 
     private func publishTelemetry(_ t: Telemetry, trackers: [LiveTracker]) {
@@ -355,6 +383,7 @@ private struct AssembledFrame: Sendable {
     let mirror: Bool            // current capture handedness (flips L/R + sign on toggle)
     let liveTrackers: [LiveTracker]
     let preview: [SIMD2<Float>]
+    let box: PersonBox?          // detected person, for the preview rectangle
     let telemetry: Telemetry
 }
 
@@ -429,6 +458,12 @@ private final class RuntimeBox: @unchecked Sendable {
     private var _fps: Double = 0
     func setFPS(_ f: Double) { lock.withLock { _fps = f } }
     func fps() -> Double { lock.withLock { _fps } }
+    /// Rate the CAMERA actually delivers frames at (not the rate we manage to process
+    /// them). In poor light the ISP lengthens exposure and the sensor simply cannot hit
+    /// 30 fps — then pipeline fps == camera fps and nothing downstream is at fault.
+    private var _cameraFPS: Double = 0
+    func setCameraFPS(_ f: Double) { lock.withLock { _cameraFPS = f } }
+    func cameraFPS() -> Double { lock.withLock { _cameraFPS } }
     private var _fpsMul: Int = 7
     func setFpsMultiplier(_ m: Int) { lock.withLock { _fpsMul = m } }
     func fpsMultiplier() -> Int { lock.withLock { _fpsMul } }
@@ -468,6 +503,8 @@ private final class FrameProcessor: @unchecked Sendable {
     private var frameCount = 0
     private var windowStart: TimeInterval = 0
     private var measuredFPS: Double = 0
+    /// Last box that cleared the detector gate (PinoFBT's `_safeLastBox`).
+    private var lastBox: PersonBox?
 
     init(config: TrackingConfig, sendElbowsOverride: Bool? = nil) {
         // 1:1 PinoFBT chain: OneEuro over raw (24,3) → preprocess → IK → bundle.
@@ -537,8 +574,11 @@ private final class FrameProcessor: @unchecked Sendable {
     func reset() { lock.withLock { smoother.reset(); solver.reset(); measuredFPS = 0; frameCount = 0; windowStart = 0 } }
     func recenter() { lock.withLock { smoother.reset(); solver.reset() } }
 
-    func process(_ pose: SMPLPose, droppedFrames: Int) -> AssembledFrame {
+    func process(_ pose: SMPLPose, droppedFrames: Int, box: PersonBox? = nil) -> AssembledFrame {
         lock.lock(); defer { lock.unlock() }
+        // Hold the last box that cleared the detector's confidence gate, so a frame
+        // where detection dips doesn't blank the rectangle (PinoFBT's `_safeLastBox`).
+        if let box { lastBox = box }
 
         // 1:1 PinoFBT: OneEuro over the RAW (24,3) model joints (camera +Y down;
         // preprocess_joints does the FY flip & scale), BEFORE IK. Proper skeleton
@@ -586,7 +626,7 @@ private final class FrameProcessor: @unchecked Sendable {
 
         return AssembledFrame(smoothedJoints: smoothed, velocity: velocity, tracked: tracked,
                               heightCm: heightCm, sendElbows: elbows, mirror: mirror, liveTrackers: live,
-                              preview: pose.normalizedPoints(),
+                              preview: pose.normalizedPoints(), box: lastBox,
                               telemetry: Telemetry(fps: measuredFPS, droppedFrames: droppedFrames,
                                                    fpsMultiplier: cfg.fpsMultiplier,
                                                    predictionLeadMs: cfg.predictionLeadMs))

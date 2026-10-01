@@ -162,7 +162,11 @@ private final class Driver {
         lastFPS = fps
         lastDropped = dropped
 
-        var line = String(format: "[Fever] %5.1f fps  drops %d", fps, dropped)
+        var line = String(format: "[Fever] %5.1f fps  cam %.1f  drops %d", fps, pipeline.cameraFPS, dropped)
+        if let b = pipeline.previewBox {
+            line += String(format: "  box(%.2f,%.2f,%.2f,%.2f s=%.2f)",
+                           b.x, b.y, b.w, b.h, b.score)
+        }
         if trackers.isEmpty {
             line += "  (no pose)"
         } else {
