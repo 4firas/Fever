@@ -48,10 +48,9 @@ public final class TrackingPipeline {
     /// telemetry rate so the UI can show real per-tracker position/rotation. Empty
     /// while stopped or before the first solved frame.
     public private(set) var liveTrackers: [LiveTracker] = []
+    /// Screen-normalized 24-joint overlay for the current inference frame. Published
+    /// every inference frame; the camera picture behind it is the live capture layer.
     public private(set) var previewPoints: [SIMD2<Float>] = []
-    /// The exact frame inference last ran on (published with previewPoints) so the
-    /// on-screen preview updates at the inference rate, not the faster camera rate.
-    public private(set) var previewImage: CGImage?
     public private(set) var droppedFrames = 0
     public private(set) var previewSession: AVCaptureSession?
     public private(set) var cameraAuthorized = false
@@ -151,15 +150,12 @@ public final class TrackingPipeline {
         let processor = self.processor
         let runtime = self.runtime
         let dropCounter = DropCounter(source: source)
-        let previewInterval = Self.telemetryInterval   // captured here (main-actor) for the worker
 
         // [weak self] so the detached worker does NOT retain the pipeline (otherwise the
         // pipeline<->Task cycle would keep it — and the worker — alive forever, so deinit
         // could never cancel it). The hot path uses the separately-captured runtime/
         // processor; only the preview/telemetry publish needs self, and skips if gone.
         worker = Task.detached(priority: .userInitiated) { [weak self] in
-            let ciContext = CIContext(options: [.useSoftwareRenderer: false])
-            var lastPreviewBuild: TimeInterval = 0
             while !Task.isCancelled {
                 if runtime.takeRebaselineRequest() { processor.recenter() }
 
@@ -185,28 +181,22 @@ public final class TrackingPipeline {
                 runtime.setFpsMultiplier(frame.telemetry.fpsMultiplier)
                 runtime.setPredictionLeadMs(frame.telemetry.predictionLeadMs)
 
-                // Preview is for the human, not the tracker — cap it at the telemetry
-                // rate (12 Hz) so the costly full-res CGImage isn't built on inference
-                // frames that would only be dropped. The publish hop is a fire-and-
-                // forget Task (NOT a blocking `await MainActor.run`) so the worker can
-                // pull the next frame immediately instead of stalling on the main thread.
-                let now = ProcessInfo.processInfo.systemUptime
+                // The camera layer underneath renders at the capture rate on its own;
+                // the overlay points ride the inference rate. (Building a full-res
+                // CGImage per publish to cover that live layer cost more than it bought
+                // and pinned the whole preview to the telemetry rate — a permanent
+                // ~12 fps ceiling.) These are just 24 SIMD2s, so publishing them every
+                // inference frame is free; the publish hop stays a fire-and-forget Task
+                // (NOT a blocking `await MainActor.run`) so the worker can pull the next
+                // frame immediately instead of stalling on the main thread.
                 let telemetry = frame.telemetry
                 let liveTrackers = frame.liveTrackers
-                // Build an IMMUTABLE preview payload (let), so the fire-and-forget Task
-                // captures a fixed value — never a `var` the loop could reassign before
-                // the Task runs (which would be a data race).
-                let previewPayload: (points: [SIMD2<Float>], image: CGImage?)?
-                if now - lastPreviewBuild >= previewInterval {
-                    lastPreviewBuild = now
-                    let ci = CIImage(cvImageBuffer: pixelBuffer)
-                    previewPayload = (frame.preview, ciContext.createCGImage(ci, from: ci.extent))
-                } else {
-                    previewPayload = nil
-                }
+                // IMMUTABLE payload (let) so the fire-and-forget Task captures a fixed
+                // value — never a `var` the loop could reassign before the Task runs.
+                let points = frame.preview
                 Task { @MainActor in
                     guard let self else { return }
-                    if let p = previewPayload { self.publishPreview(p.points, image: p.image) }
+                    self.publishPreview(points)
                     self.publishTelemetry(telemetry, trackers: liveTrackers)
                 }
             }
@@ -298,7 +288,7 @@ public final class TrackingPipeline {
         if let sender = osc { Task { await sender.stop() } }
         osc = nil
         processor.reset()
-        fps = 0; previewPoints = []; previewImage = nil; liveTrackers = []; healthNote = nil
+        fps = 0; previewPoints = []; liveTrackers = []; healthNote = nil
     }
 
     /// If the pipeline is dropped without an explicit stop(), still cancel its two
@@ -328,10 +318,9 @@ public final class TrackingPipeline {
         }
     }
 
-    private func publishPreview(_ points: [SIMD2<Float>], image: CGImage?) {
+    private func publishPreview(_ points: [SIMD2<Float>]) {
         guard isRunning else { return }
         previewPoints = points
-        previewImage = image
     }
 
     private func publishTelemetry(_ t: Telemetry, trackers: [LiveTracker]) {

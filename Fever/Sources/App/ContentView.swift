@@ -129,7 +129,7 @@ struct ContentView: View {
                           startHint: config.inferenceOnPC
                               ? "Press Start to wake the PC and stream the camera to it."
                               : "Press Start to begin tracking.",
-                          inferredFrame: config.inferenceOnPC ? nil : pipeline.previewImage)
+                          )
                 .overlay {
                     SkeletonOverlay(points: skeletonPoints)
                 }

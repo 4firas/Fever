@@ -41,10 +41,6 @@ struct CameraPreview: View {
     var running: Bool = false
     /// What pressing Start will do in the current mode (shown in the idle CTA).
     var startHint: String = "Press Start to begin tracking."
-    /// The frame inference last ran on. When non-nil (running) it's drawn over the
-    /// live layer, so the visible preview advances at the inference rate — preview
-    /// fps == inference fps. nil (stopped) falls through to the live camera layer.
-    var inferredFrame: CGImage? = nil
 
     var body: some View {
         ZStack {
@@ -54,7 +50,7 @@ struct CameraPreview: View {
             Theme.background
 
             if let session {
-                PreviewLayerView(session: session, inferredFrame: inferredFrame, camera: camera)
+                PreviewLayerView(session: session, camera: camera)
             } else {
                 placeholder
             }
@@ -95,19 +91,16 @@ struct CameraPreview: View {
 private struct PreviewLayerView: NSViewRepresentable {
 
     let session: AVCaptureSession
-    let inferredFrame: CGImage?
     let camera: CameraCapture
 
     func makeNSView(context: Context) -> PreviewNSView {
         let view = PreviewNSView()
         view.attach(session: session, camera: camera)
-        view.setInferredFrame(inferredFrame)
         return view
     }
 
     func updateNSView(_ nsView: PreviewNSView, context: Context) {
         nsView.attach(session: session, camera: camera)
-        nsView.setInferredFrame(inferredFrame)
     }
 
     /// Detach the preview layer from the capture session when SwiftUI tears this view down
@@ -131,11 +124,6 @@ private struct PreviewLayerView: NSViewRepresentable {
         /// The camera owning the session, kept to detach the preview layer on teardown
         /// (set in `attach`). Weak — the app owns the camera.
         private weak var camera: CameraCapture?
-        /// Drawn ABOVE the live layer; holds the exact inferred frame so the visible
-        /// preview only advances when inference does. Mirrored + aspect-fit to match
-        /// the live layer exactly so the skeleton overlay still lines up.
-        private var inferredLayer: CALayer?
-
         override init(frame frameRect: NSRect) {
             super.init(frame: frameRect)
             wantsLayer = true
@@ -145,17 +133,6 @@ private struct PreviewLayerView: NSViewRepresentable {
                                              green: 0x15 / 255.0,
                                              blue: 0x15 / 255.0,
                                              alpha: 1).cgColor
-
-            // Inferred-frame layer: aspect-fit, overlaying the live preview exactly.
-            // The horizontal mirror is set in attach() to MATCH the live layer's actual
-            // mirror state (built-in cam mirrors; external/GoPro does not) so the
-            // skeleton stays aligned. Contents animation disabled so frames swap crisply.
-            let inf = CALayer()
-            inf.contentsGravity = .resizeAspect
-            inf.actions = ["contents": NSNull()]
-            inf.frame = bounds
-            layer?.addSublayer(inf)
-            inferredLayer = inf
         }
 
         @available(*, unavailable)
@@ -201,23 +178,12 @@ private struct PreviewLayerView: NSViewRepresentable {
             // under a flipped skeleton — the skeleton landed reversed on the body.
             preview.transform = CATransform3DMakeScale(-1, 1, 1)
 
-            // The inferred-frame layer overlays the live layer 1:1, so it mirrors the
-            // same way the (always-mirrored) preview does.
-            inferredLayer?.transform = CATransform3DMakeScale(-1, 1, 1)
-
-            // Below the inferred-frame layer so, while running, the inferred frame
-            // (inference rate) covers the live feed; when stopped the live feed shows.
             layer?.insertSublayer(preview, at: 0)
             previewLayer = preview
 
             // Bind the session on the camera's session queue (serialized with
             // startRunning/stopRunning) — the one operation that touches the session.
             camera.attachPreview(preview, to: session)
-        }
-
-        /// Swap in the latest inferred frame (nil = show the live layer underneath).
-        func setInferredFrame(_ image: CGImage?) {
-            inferredLayer?.contents = image
         }
 
         /// Cleanly unbind the preview layer from the session before this view (and the layer)
@@ -232,7 +198,6 @@ private struct PreviewLayerView: NSViewRepresentable {
         override func layout() {
             super.layout()
             previewLayer?.frame = bounds
-            inferredLayer?.frame = bounds
         }
     }
 }
