@@ -142,7 +142,12 @@ extension StubNLFLandmarker: NLFPoseSource {
     public var isLive: Bool { false }   // canned pose — not real tracking
 }
 
-/// The live NLF backend, or the synthetic stub if the runtime isn't installed.
+/// The live NLF backend, or the synthetic stub if no runtime is installed.
+///
+/// Preference order: the native CoreML model (the vendor's own compiled graph —
+/// in-process, ANE/GPU, no Python), then the legacy onnxruntime sidecar, then the
+/// synthetic stub.
 public func makeLiveNLFLandmarker() -> any NLFPoseSource {
-    NLFPoseLandmarker() ?? StubNLFLandmarker()
+    if let coreml = CoreMLPoseLandmarker() { return coreml }
+    return NLFPoseLandmarker() ?? StubNLFLandmarker()
 }
