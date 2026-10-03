@@ -47,6 +47,12 @@ public final class CoreMLPoseLandmarker: NLFPoseSource, @unchecked Sendable {
 
     public func reset() { /* the graph self-tracks; nothing to reset */ }
 
+    public func setCropBox(_ box: PersonBox?) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.cropBox = box
+    }
+
     public func detect(_ pixelBuffer: CVPixelBuffer, at time: TimeInterval) async -> SMPLPose? {
         infer(pixelBuffer, at: time)
     }
@@ -56,7 +62,8 @@ public final class CoreMLPoseLandmarker: NLFPoseSource, @unchecked Sendable {
     private func infer(_ pixelBuffer: CVPixelBuffer, at time: TimeInterval) -> SMPLPose? {
         lock.lock()
         defer { lock.unlock() }
-        let prepared = cropBox.map { input.fill(from: pixelBuffer, box: $0, margin: 0.08) }
+        let currentCrop = cropBox?.expanded(by: 0.08)
+        let prepared = currentCrop.map { input.fill(from: pixelBuffer, box: $0) }
                                ?? input.fill(from: pixelBuffer)
         guard let prepared else { return nil }
         guard let provider = try? MLDictionaryFeatureProvider(
@@ -64,12 +71,15 @@ public final class CoreMLPoseLandmarker: NLFPoseSource, @unchecked Sendable {
         guard let out = try? model.prediction(from: provider) else { return nil }
         guard let j3 = out.featureValue(for: "joints3D")?.multiArrayValue,
               let j2 = out.featureValue(for: "joints2D")?.multiArrayValue else { return nil }
-        return Self.pose(from: j3, j2, timestamp: time)
+        let srcW = CVPixelBufferGetWidth(pixelBuffer)
+        let srcH = CVPixelBufferGetHeight(pixelBuffer)
+        return Self.pose(from: j3, j2, timestamp: time, crop: currentCrop, frameWidth: srcW, frameHeight: srcH)
     }
 
     // MARK: - output decoding
 
-    private static func pose(from j3: MLMultiArray, _ j2: MLMultiArray, timestamp: Double) -> SMPLPose {
+    private static func pose(from j3: MLMultiArray, _ j2: MLMultiArray, timestamp: Double,
+                             crop: PersonBox? = nil, frameWidth: Int = inputSide, frameHeight: Int = inputSide) -> SMPLPose {
         if ProcessInfo.processInfo.environment["FEVER_COREML_DEBUG"] != nil {
             print("[coreml] joints3D shape=\(j3.shape) strides=\(j3.strides) dtype=\(j3.dataType.rawValue)")
             print("[coreml] joints2D shape=\(j2.shape) strides=\(j2.strides) dtype=\(j2.dataType.rawValue)")
@@ -93,15 +103,27 @@ public final class CoreMLPoseLandmarker: NLFPoseSource, @unchecked Sendable {
         }
         let s2 = j2.dataPointer.assumingMemoryBound(to: UInt16.self)
         let st2 = j2.strides[1].intValue, st2c = j2.strides[2].intValue
+        let sideF = Float(inputSide)
+        let fw = Float(frameWidth)
+        let fh = Float(frameHeight)
         for i in 0..<jointCount {
             let base = (firstJoint + i) * st2
-            p2[i] = SIMD2<Float>(Float(Float16(bitPattern: s2[base + 0 * st2c])),
-                                 Float(Float16(bitPattern: s2[base + 1 * st2c])))
+            let rx = Float(Float16(bitPattern: s2[base + 0 * st2c]))
+            let ry = Float(Float16(bitPattern: s2[base + 1 * st2c]))
+            if let crop {
+                let normX = rx / sideF
+                let normY = ry / sideF
+                p2[i] = SIMD2<Float>((crop.x + normX * crop.w) * fw,
+                                     (crop.y + normY * crop.h) * fh)
+            } else {
+                p2[i] = SIMD2<Float>(rx, ry)
+            }
         }
         return SMPLPose(joints3D: p3, joints2D: p2,
                         hasTracked: confidence(p3) ? 1 : 0,
                         timestamp: timestamp,
-                        width: inputSide, height: inputSide)
+                        width: crop != nil ? frameWidth : inputSide,
+                        height: crop != nil ? frameHeight : inputSide)
     }
 
     /// Body present? The graph has no `has_tracked` output, so the tell is scale:

@@ -170,6 +170,8 @@ public final class TrackingPipeline {
         // pipeline<->Task cycle would keep it — and the worker — alive forever, so deinit
         // could never cancel it). The hot path uses the separately-captured runtime/
         // processor; only the preview/telemetry publish needs self, and skips if gone.
+        var safeLastBox: PersonBox?
+        var boxHoldCount = 0
         worker = Task.detached(priority: .userInitiated) { [weak self] in
             while !Task.isCancelled {
                 if runtime.takeRebaselineRequest() { processor.recenter() }
@@ -192,8 +194,18 @@ public final class TrackingPipeline {
                 // latency on the box, which reads as the box lagging behind the body.
                 let detected = detector?.detect(pixelBuffer)
                 if let detected {
+                    safeLastBox = detected
+                    boxHoldCount = 0
                     Task { @MainActor in self?.publishBox(detected) }
+                } else if boxHoldCount < 8 {
+                    boxHoldCount += 1
+                } else {
+                    safeLastBox = nil
                 }
+
+                let activeBox = detected ?? safeLastBox
+                landmarker.setCropBox(activeBox)
+
                 guard let pose = await landmarker.detect(pixelBuffer, at: time) else { continue }
                 if Task.isCancelled { break }   // a Stop landed during detect → don't touch the (possibly restarted) shared state
 
@@ -454,6 +466,9 @@ private final class NLFLandmarkerBox: @unchecked Sendable {
     init(_ landmarker: any NLFPoseSource) { self.landmarker = landmarker }
     func detect(_ pixelBuffer: CVPixelBuffer, at time: TimeInterval) async -> SMPLPose? {
         await landmarker.detect(pixelBuffer, at: time)
+    }
+    func setCropBox(_ box: PersonBox?) {
+        landmarker.setCropBox(box)
     }
 }
 

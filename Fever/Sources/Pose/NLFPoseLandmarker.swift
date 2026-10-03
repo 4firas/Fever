@@ -12,10 +12,13 @@ public protocol NLFPoseSource: AnyObject {
     /// False for the synthetic stub (canned standing pose used when the NLF runtime
     /// isn't installed) so the UI can warn that it's a DEMO, not real tracking.
     var isLive: Bool { get }
+    /// Optional person bounding box crop for two-stage detection/pose split architectures.
+    func setCropBox(_ box: PersonBox?)
 }
 
 public extension NLFPoseSource {
     var isLive: Bool { true }
+    func setCropBox(_ box: PersonBox?) {}
 }
 
 /// Pose backend backed by the NLF onnxruntime sidecar: downscales each camera

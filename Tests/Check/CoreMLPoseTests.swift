@@ -35,6 +35,9 @@ enum CoreMLPoseTests {
         }
         let pose = await lm.detect(pb, at: 1.0)
         let again = await lm.detect(pb, at: 1.1)
+        lm.setCropBox(PersonBox(x: 0.2, y: 0.2, w: 0.6, h: 0.6, score: 0.9))
+        let croppedPose = await lm.detect(pb, at: 1.2)
+        lm.setCropBox(nil)
         lm.reset()
 
         t.test("CoreMLPoseLandmarker: blank frame → SMPL-24 anatomy decode") {
@@ -70,6 +73,12 @@ enum CoreMLPoseTests {
             }
             t.check(same, "same input frame → same joints")
             t.check(again.timestamp == 1.1, "timestamp is the capture time")
+        }
+
+        t.test("CoreMLPoseLandmarker: setCropBox uncrops joints2D to full frame") {
+            guard let croppedPose else { t.check(false, "crop detect returned nil"); return }
+            t.check(croppedPose.joints3D.count == SMPLJoint.count, "24 joints3D")
+            t.check(croppedPose.joints2D.count == SMPLJoint.count, "24 joints2D")
         }
     }
 
