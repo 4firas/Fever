@@ -10,6 +10,9 @@ struct SkeletonOverlay: View {
 
     /// 24-slot, screen-normalized points (SMPLJoint order); NaN entries are absent.
     let points: [SIMD2<Float>]
+    /// Detected-person rectangle (screen-normalized, top-left), drawn like PinoFBT's
+    /// preview. nil when nothing cleared the detector's confidence gate.
+    var box: PersonBox? = nil
 
     /// Locked camera aspect (1280x720) to reproduce the preview aspect-fit.
     private let cameraAspect: CGFloat = 1280.0 / 720.0
@@ -47,6 +50,20 @@ struct SkeletonOverlay: View {
                            style: StrokeStyle(lineWidth: 3.5, lineCap: .round, lineJoin: .round))
             context.stroke(bonePath, with: .color(.white.opacity(0.95)),
                            style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+
+            // Detected-person rectangle: same two-pass treatment as the bones (soft
+            // dark underlay + crisp light stroke) so it reads on any background.
+            if let box {
+                let r = CGRect(x: offX + CGFloat(box.x) * drawnW,
+                               y: offY + CGFloat(box.y) * drawnH,
+                               width: CGFloat(box.w) * drawnW,
+                               height: CGFloat(box.h) * drawnH)
+                let rect = Path(roundedRect: r, cornerRadius: min(r.width, r.height) * 0.02)
+                context.stroke(rect, with: .color(.black.opacity(0.35)),
+                               style: StrokeStyle(lineWidth: 5, lineCap: .round, lineJoin: .round))
+                context.stroke(rect, with: .color(Theme.crimsonBright.opacity(0.95)),
+                               style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+            }
 
             // Joint dots, colored by SMPL body side (left/right/center).
             for i in 0..<SMPLJoint.count {

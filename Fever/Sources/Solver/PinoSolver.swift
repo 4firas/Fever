@@ -49,10 +49,7 @@ public final class PinoSolver {
     }
 
     public func setHeightCm(_ cm: Float) { heightRatio = cm / Self.referenceHeightCm }
-    /// Hold-last state for the grafted old-Fever elbow rotations (frameFromTwoAxes),
-    /// to survive degenerate (straight-arm) frames.
-    private var elbowHold: [Int: simd_quatf] = [:]
-    public func reset() { elbowHold.removeAll() }
+    public func reset() { /* native PinoFBT 2.0 solver is stateless */ }
 
     /// Solve one frame. `joints` = 24 OneEuro-filtered model joints (camera +Y down).
     public func solve(joints: [SIMD3<Float>], tracked: Bool) -> SolvedFrame {
@@ -60,18 +57,15 @@ public final class PinoSolver {
 
         // ── IK ────────────────────────────────────────────────────────────────
         let rootQ = PinoKinematics.calcRootRotation(O)                 // hip
-        let (chestQ, _) = PinoKinematics.calcChestRotation(O)
+        let (chestQ, chestResidual) = PinoKinematics.calcChestRotation(O)
 
-        // ELBOWS (slots 3/4): GRAFTED old-Fever elbow solver (the version whose elbow
-        // tracking the user liked) — frameFromTwoAxes over forearm (primary, elbow→wrist)
-        // + upper arm (secondary, shoulder→elbow), hold-last through degenerate frames.
-        // Run in the new O-space; lane swap (VRChat-L slot3 ← SMPL R bones) like the legs.
-        let ident = simd_quatf(ix: 0, iy: 0, iz: 0, r: 1)
-        let lElbowQ = frameFromTwoAxes(primary: O[21] - O[19], secondary: O[19] - O[17],
-                                       holdLast: elbowHold[3] ?? ident)   // R bones → L lane
-        let rElbowQ = frameFromTwoAxes(primary: O[20] - O[18], secondary: O[18] - O[16],
-                                       holdLast: elbowHold[4] ?? ident)   // L bones → R lane
-        if tracked { elbowHold[3] = lElbowQ; elbowHold[4] = rElbowQ }
+        // ARMS (slots 3/4): pure 1:1 PinoFBT 2.0 calcPairedArmRotations
+        let arms = PinoKinematics.calcPairedArmRotations(
+            chestResidual: chestResidual,
+            rShoulder: O[17], lShoulder: O[16],
+            rElbow: O[19], lElbow: O[18],
+            rWrist: O[21], lWrist: O[20]
+        )
 
         // KNEE: blocks [R,L]; out[0]=L lane (from R bones), out[1]=R lane (from L bones).
         let lKneeQ = PinoKinematics.kneeRotation(hip: O[2], knee: O[5], ankle: O[8], toe: O[11])  // R bones → L lane
@@ -85,8 +79,8 @@ public final class PinoSolver {
         let eulers: [Int: SIMD3<Float>] = [
             1: PinoKinematics.eulerZXY121Degrees(chestQ),
             2: PinoKinematics.eulerZXY121Degrees(rootQ),
-            3: PinoKinematics.eulerZXY121Degrees(lElbowQ.vector),
-            4: PinoKinematics.eulerZXY121Degrees(rElbowQ.vector),
+            3: PinoKinematics.eulerZXY121Degrees(arms.lElbow),
+            4: PinoKinematics.eulerZXY121Degrees(arms.rElbow),
             5: PinoKinematics.eulerZXY121Degrees(lKneeQ),
             6: PinoKinematics.eulerZXY121Degrees(rKneeQ),
             7: PinoKinematics.eulerZXY121Degrees(lAnkleQ),
@@ -104,11 +98,11 @@ public final class PinoSolver {
         positions[6] = O[4]  * r                                       // R_knee
         positions[7] = O[8]  * r                                       // L_ankle
         positions[8] = O[7]  * r                                       // R_ankle
-        // Elbows (slots 3/4): DIRECT elbow joint (old-Fever solver's placement) — sits
-        // at the actual elbow, no FK lever (no chest-float, no overshoot/X). Lane swap:
-        // VRChat-L slot3 ← SMPL R_elbow joint, like the knees/ankles.
-        positions[3] = O[19] * r   // L_elbow ← SMPL R_elbow joint
-        positions[4] = O[18] * r   // R_elbow ← SMPL L_elbow joint
+
+        // Elbows (slots 3/4): pure 1:1 PinoFBT 2.0 forward kinematics
+        // Reconstruct from shoulder joint + rotated rest bone offset
+        positions[3] = (O[16] + PinoKinematics.quatApply(arms.lElbow, Self.restElbowL)) * r
+        positions[4] = (O[17] + PinoKinematics.quatApply(arms.rElbow, Self.restElbowR)) * r
 
         // Head: position only, preO[15] × 0.895 (head-specific scale).
         let head = O[15] * Self.headScale

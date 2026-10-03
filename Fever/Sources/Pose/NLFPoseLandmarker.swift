@@ -12,10 +12,13 @@ public protocol NLFPoseSource: AnyObject {
     /// False for the synthetic stub (canned standing pose used when the NLF runtime
     /// isn't installed) so the UI can warn that it's a DEMO, not real tracking.
     var isLive: Bool { get }
+    /// Optional person bounding box crop for two-stage detection/pose split architectures.
+    func setCropBox(_ box: PersonBox?)
 }
 
 public extension NLFPoseSource {
     var isLive: Bool { true }
+    func setCropBox(_ box: PersonBox?) {}
 }
 
 /// Pose backend backed by the NLF onnxruntime sidecar: downscales each camera
@@ -142,7 +145,12 @@ extension StubNLFLandmarker: NLFPoseSource {
     public var isLive: Bool { false }   // canned pose — not real tracking
 }
 
-/// The live NLF backend, or the synthetic stub if the runtime isn't installed.
+/// The live NLF backend, or the synthetic stub if no runtime is installed.
+///
+/// Preference order: the native CoreML model (the vendor's own compiled graph —
+/// in-process, ANE/GPU, no Python), then the legacy onnxruntime sidecar, then the
+/// synthetic stub.
 public func makeLiveNLFLandmarker() -> any NLFPoseSource {
-    NLFPoseLandmarker() ?? StubNLFLandmarker()
+    if let coreml = CoreMLPoseLandmarker() { return coreml }
+    return NLFPoseLandmarker() ?? StubNLFLandmarker()
 }

@@ -42,6 +42,13 @@ struct ContentView: View {
         return pipeline.previewPoints.map { SIMD2<Float>(1 - $0.x, $0.y) }
     }
 
+    /// Detected-person rectangle, mirrored in x to match the preview (the box is in
+    /// raw-frame space like the joints; the preview layer flips horizontally).
+    private var skeletonBox: PersonBox? {
+        guard !config.inferenceOnPC, let b = pipeline.previewBox else { return nil }
+        return PersonBox(x: 1 - (b.x + b.w), y: b.y, w: b.w, h: b.h, score: b.score)
+    }
+
     /// Mode-aware status for the main-window chrome (so PC mode shows PC state, not
     /// the stopped on-device pipeline).
     private var liveStatus: LiveStatus {
@@ -129,9 +136,9 @@ struct ContentView: View {
                           startHint: config.inferenceOnPC
                               ? "Press Start to wake the PC and stream the camera to it."
                               : "Press Start to begin tracking.",
-                          inferredFrame: config.inferenceOnPC ? nil : pipeline.previewImage)
+                          )
                 .overlay {
-                    SkeletonOverlay(points: skeletonPoints)
+                    SkeletonOverlay(points: skeletonPoints, box: skeletonBox)
                 }
 
             // CONTROLS: floating chrome, sized to the window. Using a

@@ -56,6 +56,8 @@ struct FeverCheck {
         testOneEuroFilter(t)
         NLFProtocolTests.run(t)
         SlotMapTests.run(t)
+        await CoreMLPoseTests.register(t)
+        await DetectionTests.register(t)
 
         // Suites (all exercise the live PinoSolver / OSC wire / config).
         await WireDefenseTests.run(t)
